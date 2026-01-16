@@ -125,7 +125,20 @@ def main() -> None:
     for idx, r in enumerate(rows):
         m = r.get("metadata", {})
         required_keys = ["chunk_id", "chunk_key", "chunk_hash", "source_uri", "heading_path", "chunk_index", "cleaned_text"]
-        if any(k not in m or m.get(k) in (None, "") for k in required_keys):
+        missing = False
+        for k in required_keys:
+            if k not in m:
+                missing = True
+                break
+            if k == "heading_path":
+                if m.get(k) is None:
+                    missing = True
+                    break
+                continue
+            if m.get(k) in (None, ""):
+                missing = True
+                break
+        if missing:
             missing_meta.append(idx)
             if len(missing_meta) >= 5:
                 break
@@ -183,7 +196,6 @@ def main() -> None:
     else:
         try:
             collection = client.get_collection(name=args.collection)
-            print(f"[stage_3] using existing collection: {args.collection}")
         except Exception:
             collection = client.create_collection(
                 name=args.collection,
@@ -196,6 +208,21 @@ def main() -> None:
                 },
             )
             print(f"[stage_3] created collection: {args.collection}")
+        else:
+            print(f"[stage_3] using existing collection: {args.collection}")
+            coll_meta = getattr(collection, "metadata", None) or {}
+            coll_model = coll_meta.get("embed_model")
+            coll_hash = coll_meta.get("settings_hash")
+            if coll_model and coll_model != args.embed_model:
+                raise ValueError(
+                    "Collection embed_model mismatch. "
+                    "Use --mode rebuild or a new --collection name."
+                )
+            if coll_hash and coll_hash != settings_hash:
+                raise ValueError(
+                    "Collection settings_hash mismatch. "
+                    "Use --mode rebuild or a new --collection name."
+                )
 
     if args.mode == "append":
         existing = find_existing_ids(collection, ids, batch_size=min(args.batch_size, 256))

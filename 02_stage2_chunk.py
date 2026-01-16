@@ -57,7 +57,7 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
     rows = []
     total_chunks = 0
 
-    for anchor, section_title, section_raw in sections:
+    for anchor, section_title, heading_path, section_raw in sections:
         # normalize then replace links per chunk
         normalized = normalize_markdown_light(section_raw)
 
@@ -97,7 +97,6 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
                     parts.append(chunk_text.strip() + "\n")
                     parts_links.append(chunk_links)
 
-        heading_path = section_title
         for idx, chunk_text in enumerate(parts):
             identity = generate_chunk_identity(source_uri, heading_path, idx, chunk_text)
             chunk_id = identity["chunk_id"]

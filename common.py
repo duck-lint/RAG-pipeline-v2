@@ -30,8 +30,19 @@ def canonicalize_source_uri(source_uri: str) -> str:
         s = s[2:]
     return s
 
-def canonicalize_heading_path(heading_path: str) -> str:
-    return heading_path.strip()
+def _normalize_heading_text(text: str) -> str:
+    t = re.sub(r"\s+", " ", text.strip())
+    return t.lower()
+
+def canonicalize_heading_path(heading_path: Any) -> List[str]:
+    if isinstance(heading_path, list):
+        parts = heading_path
+    elif isinstance(heading_path, str):
+        parts = [heading_path]
+    else:
+        parts = []
+    canon = [_normalize_heading_text(p) for p in parts if isinstance(p, str)]
+    return [p for p in canon if p]
 
 def canonicalize_cleaned_text(text: str) -> str:
     t = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -39,23 +50,24 @@ def canonicalize_cleaned_text(text: str) -> str:
 
 def generate_chunk_identity(
     source_uri: str,
-    heading_path: str,
+    heading_path: Any,
     chunk_index: int,
     cleaned_text: str,
 ) -> Dict[str, str]:
     canon_source = canonicalize_source_uri(source_uri)
-    canon_heading = canonicalize_heading_path(heading_path)
-    key_input = f"{canon_source}|{canon_heading}|{chunk_index}"
+    canon_heading_list = canonicalize_heading_path(heading_path)
+    canon_heading_str = " > ".join(canon_heading_list)
+    key_input = f"{canon_source}|{canon_heading_str}|{chunk_index}"
     chunk_key = blake2b_hex(key_input)
     canon_text = canonicalize_cleaned_text(cleaned_text)
     chunk_hash = blake2b_hex(canon_text)
-    chunk_id = blake2b_hex(f"{key_input}|{canon_text}")
+    chunk_id = f"{chunk_key}~{chunk_hash[:10]}"
     return {
         "chunk_id": chunk_id,
         "chunk_key": chunk_key,
         "chunk_hash": chunk_hash,
         "source_uri": canon_source,
-        "heading_path": canon_heading,
+        "heading_path": canon_heading_list,
     }
 
 def read_text(path: Path) -> str:
@@ -199,7 +211,7 @@ def replace_wikilinks_and_collect(text: str) -> Tuple[str, List[Dict[str, str]]]
 
 HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*)$")
 
-def split_into_sections(body_md: str) -> List[Tuple[str, str, str]]:
+def split_into_sections(body_md: str) -> List[Tuple[str, str, List[str], str]]:
     """
     Split into sections by heading.
     Preference rule:
@@ -218,37 +230,48 @@ def split_into_sections(body_md: str) -> List[Tuple[str, str, str]]:
 
     if not levels_present:
         txt = "\n".join(lines).strip() + "\n"
-        return [("preamble", "preamble", txt)] if txt.strip() else []
+        return [("preamble", "preamble", [], txt)] if txt.strip() else []
 
     target_level = 2 if 2 in levels_present else min(levels_present)
 
-    sections: List[Tuple[str, str, List[str]]] = []
+    sections: List[Tuple[str, str, List[str], List[str]]] = []
     current_title = "preamble"
+    current_path: List[str] = []
     current_lines: List[str] = []
+    heading_stack: Dict[int, str] = {}
 
     def flush() -> None:
-        nonlocal current_title, current_lines
+        nonlocal current_title, current_lines, current_path
         anchor = slugify(current_title)
-        sections.append((anchor, current_title, current_lines))
+        sections.append((anchor, current_title, current_path, current_lines))
         current_lines = []
 
     for line in lines:
         m = HEADING_RE.match(line)
-        if m and len(m.group(1)) == target_level:
-            # Start new section; DO NOT include the heading line in section_text
-            flush()
-            current_title = m.group(2).strip()
-        else:
-            current_lines.append(line)
+        if m:
+            level = len(m.group(1))
+            title = m.group(2).strip()
+            # update stack
+            heading_stack[level] = title
+            for k in list(heading_stack.keys()):
+                if k > level:
+                    del heading_stack[k]
+            if level == target_level:
+                # Start new section; DO NOT include the heading line in section_text
+                flush()
+                current_title = title
+                current_path = [heading_stack[l] for l in sorted(heading_stack.keys()) if l <= target_level]
+                continue
+        current_lines.append(line)
 
     flush()
 
-    out: List[Tuple[str, str, str]] = []
-    for anchor, title, lns in sections:
+    out: List[Tuple[str, str, List[str], str]] = []
+    for anchor, title, path, lns in sections:
         txt = "\n".join(lns).strip() + "\n"
         if anchor == "preamble" and not txt.strip():
             continue
-        out.append((anchor, title, txt))
+        out.append((anchor, title, path, txt))
     return out
 
 def write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
