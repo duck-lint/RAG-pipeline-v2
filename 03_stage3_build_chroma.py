@@ -21,7 +21,7 @@ CHROMA_META_KEYS = [
     "chunk_hash",
     "chunk_anchor",
     "chunk_title",
-    "heading_path",
+    "heading_path_str",
     "chunk_index",
     "rel_path",
     "source_uri",
@@ -66,6 +66,15 @@ def find_existing_ids(collection: Any, ids: List[str], batch_size: int) -> List[
         existing.extend(res.get("ids", []))
     return existing
 
+def get_existing_meta_by_id(collection: Any, ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    try:
+        res = collection.get(ids=ids, include=["metadatas"])
+    except TypeError:
+        res = collection.get(ids=ids)
+    got_ids = res.get("ids", [])
+    metas = res.get("metadatas", []) or []
+    return {i: m for i, m in zip(got_ids, metas) if m is not None}
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -78,6 +87,7 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=32, help="default=32")
     ap.add_argument("--reset_db", action="store_true", help="Delete persist_dir before building (rebuild only)")
     ap.add_argument("--mode", type=str, choices=["rebuild", "append", "upsert"], default="upsert")
+    ap.add_argument("--skip_unchanged", action="store_true", help="When upserting, skip chunks whose hash hasn't changed")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
 
@@ -119,25 +129,34 @@ def main() -> None:
     metas = []
     for r in rows:
         m = r["metadata"]
-        metas.append({k: m.get(k) for k in CHROMA_META_KEYS if m.get(k) is not None})
+        heading_path = m.get("heading_path") or []
+        if isinstance(heading_path, list):
+            heading_path_str = " > ".join(heading_path)
+        else:
+            heading_path_str = str(heading_path)
+        base = {k: m.get(k) for k in CHROMA_META_KEYS if k != "heading_path_str" and m.get(k) is not None}
+        base["heading_path_str"] = heading_path_str
+        metas.append(base)
 
     missing_meta = []
     for idx, r in enumerate(rows):
         m = r.get("metadata", {})
-        required_keys = ["chunk_id", "chunk_key", "chunk_hash", "source_uri", "heading_path", "chunk_index", "cleaned_text"]
+        required_keys = ["chunk_id", "chunk_key", "chunk_hash", "source_uri", "chunk_index", "cleaned_text"]
         missing = False
         for k in required_keys:
             if k not in m:
                 missing = True
                 break
-            if k == "heading_path":
-                if m.get(k) is None:
-                    missing = True
-                    break
-                continue
             if m.get(k) in (None, ""):
                 missing = True
                 break
+        heading_path = m.get("heading_path") or []
+        if isinstance(heading_path, list):
+            heading_path_str = " > ".join(heading_path)
+        else:
+            heading_path_str = str(heading_path)
+        if heading_path_str is None:
+            missing = True
         if missing:
             missing_meta.append(idx)
             if len(missing_meta) >= 5:
@@ -239,21 +258,38 @@ def main() -> None:
         batch_ids = [ids[i] for i in idxs]
         batch_metas = [metas[i] for i in idxs]
 
-        embeddings = model.encode(
-            batch_docs,
-            batch_size=min(args.batch_size, len(batch_docs)),
-            convert_to_numpy=True,
-            normalize_embeddings=True,  # cosine-friendly
-            show_progress_bar=False,
-        )
-
         if args.mode == "upsert":
+            if args.skip_unchanged:
+                existing_meta = get_existing_meta_by_id(collection, batch_ids)
+                keep_ids: List[str] = []
+                keep_docs: List[str] = []
+                keep_metas: List[Dict[str, Any]] = []
+                for i, cid in enumerate(batch_ids):
+                    prev = existing_meta.get(cid)
+                    if prev and prev.get("chunk_hash") == batch_metas[i].get("chunk_hash"):
+                        continue
+                    keep_ids.append(cid)
+                    keep_docs.append(batch_docs[i])
+                    keep_metas.append(batch_metas[i])
+                if not keep_ids:
+                    continue
+                batch_ids = keep_ids
+                batch_docs = keep_docs
+                batch_metas = keep_metas
+            embeddings = model.encode(
+                batch_docs,
+                batch_size=min(args.batch_size, len(batch_docs)),
+                convert_to_numpy=True,
+                normalize_embeddings=True,  # cosine-friendly
+                show_progress_bar=False,
+            )
+            embeddings_list = embeddings.tolist()
             if hasattr(collection, "upsert"):
                 collection.upsert(
                     ids=batch_ids,
                     documents=batch_docs,
                     metadatas=batch_metas,
-                    embeddings=embeddings.tolist(),
+                    embeddings=embeddings_list,
                 )
             else:
                 existing = find_existing_ids(collection, batch_ids, batch_size=len(batch_ids))
@@ -263,9 +299,16 @@ def main() -> None:
                     ids=batch_ids,
                     documents=batch_docs,
                     metadatas=batch_metas,
-                    embeddings=embeddings.tolist(),
+                    embeddings=embeddings_list,
                 )
         else:
+            embeddings = model.encode(
+                batch_docs,
+                batch_size=min(args.batch_size, len(batch_docs)),
+                convert_to_numpy=True,
+                normalize_embeddings=True,  # cosine-friendly
+                show_progress_bar=False,
+            )
             collection.add(
                 ids=batch_ids,
                 documents=batch_docs,

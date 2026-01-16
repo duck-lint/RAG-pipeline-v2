@@ -61,7 +61,7 @@ def generate_chunk_identity(
     chunk_key = blake2b_hex(key_input)
     canon_text = canonicalize_cleaned_text(cleaned_text)
     chunk_hash = blake2b_hex(canon_text)
-    chunk_id = f"{chunk_key}~{chunk_hash[:10]}"
+    chunk_id = chunk_key
     return {
         "chunk_id": chunk_id,
         "chunk_key": chunk_key,
