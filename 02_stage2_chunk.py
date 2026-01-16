@@ -12,6 +12,7 @@ from common import (
     write_jsonl,
     split_into_sections,
     parse_date_field,
+    generate_chunk_identity,
 )
 
 CHUNKER_VERSION = "v0.1"
@@ -46,6 +47,7 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
 
     doc_id = str(meta.get("uuid") or "").strip() or sha256_bytes(raw_bytes)[:24]  # V1 fallback
     rel_path = str(rel)
+    source_uri = rel_path.replace("\\", "/")
     entry_date = parse_date_field(meta, "journal_entry_date")
     source_date = parse_date_field(meta, "note_creation_date")
     source_hash = sha256_bytes(raw_bytes)
@@ -95,8 +97,12 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
                     parts.append(chunk_text.strip() + "\n")
                     parts_links.append(chunk_links)
 
+        heading_path = section_title
         for idx, chunk_text in enumerate(parts):
-            chunk_id = f"{doc_id}::{anchor}::{idx}"
+            identity = generate_chunk_identity(source_uri, heading_path, idx, chunk_text)
+            chunk_id = identity["chunk_id"]
+            chunk_key = identity["chunk_key"]
+            chunk_hash = identity["chunk_hash"]
             content_hash = sha256_text(chunk_text)
 
             rows.append({
@@ -104,10 +110,15 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
                 "metadata": {
                     "doc_id": doc_id,
                     "chunk_id": chunk_id,
+                    "chunk_key": chunk_key,
+                    "chunk_hash": chunk_hash,
                     "chunk_anchor": anchor,
                     "chunk_title": section_title,
+                    "heading_path": identity["heading_path"],
                     "chunk_index": idx,
                     "rel_path": rel_path,
+                    "source_uri": identity["source_uri"],
+                    "cleaned_text": chunk_text,
                     "entry_date": entry_date,
                     "source_date": source_date,
                     "source_hash": source_hash,

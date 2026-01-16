@@ -20,6 +20,44 @@ def sha256_bytes(b: bytes) -> str:
 def sha256_text(s: str) -> str:
     return sha256_bytes(s.encode("utf-8", errors="replace"))
 
+def blake2b_hex(s: str, digest_size: int = 16) -> str:
+    return hashlib.blake2b(s.encode("utf-8", errors="replace"), digest_size=digest_size).hexdigest()
+
+def canonicalize_source_uri(source_uri: str) -> str:
+    s = source_uri.strip().replace("\\", "/")
+    s = re.sub(r"/{2,}", "/", s)
+    if s.startswith("./"):
+        s = s[2:]
+    return s
+
+def canonicalize_heading_path(heading_path: str) -> str:
+    return heading_path.strip()
+
+def canonicalize_cleaned_text(text: str) -> str:
+    t = text.replace("\r\n", "\n").replace("\r", "\n")
+    return t.strip()
+
+def generate_chunk_identity(
+    source_uri: str,
+    heading_path: str,
+    chunk_index: int,
+    cleaned_text: str,
+) -> Dict[str, str]:
+    canon_source = canonicalize_source_uri(source_uri)
+    canon_heading = canonicalize_heading_path(heading_path)
+    key_input = f"{canon_source}|{canon_heading}|{chunk_index}"
+    chunk_key = blake2b_hex(key_input)
+    canon_text = canonicalize_cleaned_text(cleaned_text)
+    chunk_hash = blake2b_hex(canon_text)
+    chunk_id = blake2b_hex(f"{key_input}|{canon_text}")
+    return {
+        "chunk_id": chunk_id,
+        "chunk_key": chunk_key,
+        "chunk_hash": chunk_hash,
+        "source_uri": canon_source,
+        "heading_path": canon_heading,
+    }
+
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 

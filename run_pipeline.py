@@ -44,10 +44,9 @@ def main() -> None:
         action="store_true",
         help="Recurse when using --chunks_dir",
     )
-    ap.add_argument("--db_dir", type=str, default="stage_3_chroma")
+    ap.add_argument("--persist_dir", type=str, default="stage_3_chroma")
     ap.add_argument("--collection", type=str, default="v1_chunks")
-    ap.add_argument("--append", action="store_true")
-    ap.add_argument("--upsert", action="store_true")
+    ap.add_argument("--mode", type=str, choices=["rebuild", "append", "upsert"], default="upsert")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
 
@@ -148,13 +147,13 @@ def main() -> None:
                         "03_stage3_build_chroma.py",
                         "--chunks_jsonl",
                         str(path),
-                        "--db_dir",
-                        args.db_dir,
+                        "--persist_dir",
+                        args.persist_dir,
                         "--collection",
                         args.collection,
                         *dry_run_flag,
-                        *(["--append"] if args.append else []),
-                        *(["--upsert"] if args.upsert else []),
+                        "--mode",
+                        args.mode,
                     ]
                 )
         else:
@@ -170,13 +169,13 @@ def main() -> None:
                     "03_stage3_build_chroma.py",
                     "--chunks_jsonl",
                     chunks_input,
-                    "--db_dir",
-                    args.db_dir,
+                    "--persist_dir",
+                    args.persist_dir,
                     "--collection",
                     args.collection,
                     *dry_run_flag,
-                    *(["--append"] if args.append else []),
-                    *(["--upsert"] if args.upsert else []),
+                    "--mode",
+                    args.mode,
                 ]
             )
 

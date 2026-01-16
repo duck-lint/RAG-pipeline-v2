@@ -17,10 +17,15 @@ STAGE3_VERSION = "v0.1"
 CHROMA_META_KEYS = [
     "doc_id",
     "chunk_id",
+    "chunk_key",
+    "chunk_hash",
     "chunk_anchor",
     "chunk_title",
+    "heading_path",
     "chunk_index",
     "rel_path",
+    "source_uri",
+    "cleaned_text",
     "entry_date",
     "source_date",
     "source_hash",
@@ -50,28 +55,43 @@ def load_jsonl(path: Path) -> List[Dict[str, Any]]:
 def batch(iterable: List[Any], n: int) -> List[List[Any]]:
     return [iterable[i : i + n] for i in range(0, len(iterable), n)]
 
+def find_existing_ids(collection: Any, ids: List[str], batch_size: int) -> List[str]:
+    existing: List[str] = []
+    for idxs in batch(list(range(len(ids))), batch_size):
+        batch_ids = [ids[i] for i in idxs]
+        try:
+            res = collection.get(ids=batch_ids, include=[])
+        except TypeError:
+            res = collection.get(ids=batch_ids)
+        existing.extend(res.get("ids", []))
+    return existing
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--chunks_jsonl", type=str, default="stage_2_chunks.jsonl", help="default=stage_2_chunks.jsonl")
-    ap.add_argument("--db_dir", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
+    ap.add_argument("--persist_dir", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
+    ap.add_argument("--db_dir", type=str, help="(deprecated) use --persist_dir instead")
     ap.add_argument("--collection", type=str, default="v1_chunks", help="default=v1_chunks")
     ap.add_argument("--embed_model", type=str, default="sentence-transformers/all-MiniLM-L6-v2", help="default=sentence-transformers/all-MiniLM-L6-v2")
     ap.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda | default=auto")
     ap.add_argument("--batch_size", type=int, default=32, help="default=32")
-    ap.add_argument("--reset_db", action="store_true", help="Delete stage_3_chroma/ before building")
-    ap.add_argument("--append", action="store_true", help="Append to existing collection instead of recreating it")
-    ap.add_argument("--upsert", action="store_true", help="When appending, upsert instead of add (overwrite existing ids)")
+    ap.add_argument("--reset_db", action="store_true", help="Delete persist_dir before building (rebuild only)")
+    ap.add_argument("--mode", type=str, choices=["rebuild", "append", "upsert"], default="upsert")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
 
     print(f"[stage_03_chroma] args: {args}")
 
     chunks_path = Path(args.chunks_jsonl).resolve()
-    db_dir = Path(args.db_dir).resolve()
+    persist_dir = Path(args.persist_dir).resolve()
+    if args.db_dir:
+        persist_dir = Path(args.db_dir).resolve()
 
     if not chunks_path.exists():
         raise FileNotFoundError(f"Missing chunks file: {chunks_path}")
+    if not args.collection or not args.collection.strip():
+        raise ValueError("--collection must be a non-empty name")
 
     # Decide device
     if args.device == "auto":
@@ -83,14 +103,13 @@ def main() -> None:
         "pipeline_version": PIPELINE_VERSION,
         "stage3_version": STAGE3_VERSION,
         "chunks_jsonl": str(chunks_path),
-        "db_dir": str(db_dir),
+        "persist_dir": str(persist_dir),
         "collection": args.collection,
         "embed_model": args.embed_model,
         "device": device,
         "batch_size": args.batch_size,
         "reset_db": args.reset_db,
-        "append": args.append,
-        "upsert": args.upsert,
+        "mode": args.mode,
     }
     settings_hash = stable_settings_hash(settings)
 
@@ -102,10 +121,25 @@ def main() -> None:
         m = r["metadata"]
         metas.append({k: m.get(k) for k in CHROMA_META_KEYS if m.get(k) is not None})
 
+    missing_meta = []
+    for idx, r in enumerate(rows):
+        m = r.get("metadata", {})
+        required_keys = ["chunk_id", "chunk_key", "chunk_hash", "source_uri", "heading_path", "chunk_index", "cleaned_text"]
+        if any(k not in m or m.get(k) in (None, "") for k in required_keys):
+            missing_meta.append(idx)
+            if len(missing_meta) >= 5:
+                break
+    if missing_meta:
+        raise ValueError(f"Missing required chunk metadata in rows: {missing_meta}")
+
     # Basic sanity
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate chunk_id detected in stage_2_chunks.jsonl")
 
+    print(
+        f"[stage_3] start persist_dir={persist_dir} | collection={args.collection} | "
+        f"mode={args.mode} | docs={len(docs)} | chunks={len(rows)}"
+    )
     print("[stage_3] ---- input summary ----")
     print(f"[stage_3] chunks_jsonl={chunks_path}")
     print(f"[stage_3] rows={len(rows)}")
@@ -117,21 +151,36 @@ def main() -> None:
         print("[stage_3] dry_run=True (not embedding / not writing DB)")
         return
 
-    # Reset DB directory if requested
-    if args.reset_db and db_dir.exists():
-        shutil.rmtree(db_dir)
-        print(f"[stage_3] deleted db_dir: {db_dir}")
+    # Reset persist directory if requested (rebuild mode only)
+    if args.reset_db and args.mode == "rebuild" and persist_dir.exists():
+        shutil.rmtree(persist_dir)
+        print(f"[stage_3] deleted persist_dir: {persist_dir}")
 
-    db_dir.mkdir(parents=True, exist_ok=True)
+    persist_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize model
     model = SentenceTransformer(args.embed_model, device=device)
 
     # Create Chroma persistent client
-    client = chromadb.PersistentClient(path=str(db_dir))
+    client = chromadb.PersistentClient(path=str(persist_dir))
 
-    # Create or get collection
-    if args.append:
+    if args.mode == "rebuild":
+        try:
+            client.delete_collection(name=args.collection)
+            print(f"[stage_3] deleted existing collection: {args.collection}")
+        except Exception:
+            pass
+        collection = client.create_collection(
+            name=args.collection,
+            metadata={
+                "pipeline_version": PIPELINE_VERSION,
+                "stage3_version": STAGE3_VERSION,
+                "embed_model": args.embed_model,
+                "device": device,
+                "settings_hash": settings_hash,
+            },
+        )
+    else:
         try:
             collection = client.get_collection(name=args.collection)
             print(f"[stage_3] using existing collection: {args.collection}")
@@ -147,27 +196,16 @@ def main() -> None:
                 },
             )
             print(f"[stage_3] created collection: {args.collection}")
-    else:
-        try:
-            client.delete_collection(name=args.collection)
-            print(f"[stage_3] deleted existing collection: {args.collection}")
-        except Exception:
-            pass
 
-        collection = client.create_collection(
-            name=args.collection,
-            metadata={
-                "pipeline_version": PIPELINE_VERSION,
-                "stage3_version": STAGE3_VERSION,
-                "embed_model": args.embed_model,
-                "device": device,
-                "settings_hash": settings_hash,
-            },
-        )
+    if args.mode == "append":
+        existing = find_existing_ids(collection, ids, batch_size=min(args.batch_size, 256))
+        if existing:
+            sample = existing[:10]
+            raise ValueError(
+                f"Append mode found {len(existing)} duplicate ids. Sample: {sample}"
+            )
 
-    add_fn = collection.upsert if (args.append and args.upsert) else collection.add
-
-    # Embed and add in batches
+    # Embed and ingest in batches
     total = 0
     for idxs in batch(list(range(len(docs))), args.batch_size):
         batch_docs = [docs[i] for i in idxs]
@@ -182,17 +220,36 @@ def main() -> None:
             show_progress_bar=False,
         )
 
-        add_fn(
-            ids=batch_ids,
-            documents=batch_docs,
-            metadatas=batch_metas,
-            embeddings=embeddings.tolist(),
-        )
+        if args.mode == "upsert":
+            if hasattr(collection, "upsert"):
+                collection.upsert(
+                    ids=batch_ids,
+                    documents=batch_docs,
+                    metadatas=batch_metas,
+                    embeddings=embeddings.tolist(),
+                )
+            else:
+                existing = find_existing_ids(collection, batch_ids, batch_size=len(batch_ids))
+                if existing:
+                    collection.delete(ids=existing)
+                collection.add(
+                    ids=batch_ids,
+                    documents=batch_docs,
+                    metadatas=batch_metas,
+                    embeddings=embeddings.tolist(),
+                )
+        else:
+            collection.add(
+                ids=batch_ids,
+                documents=batch_docs,
+                metadatas=batch_metas,
+                embeddings=embeddings.tolist(),
+            )
         total += len(batch_docs)
 
     print("[stage_3] ---- build summary ----")
     print(f"[stage_3] wrote collection={args.collection} | total_added={total}")
-    print(f"[stage_3] db_dir={db_dir}")
+    print(f"[stage_3] persist_dir={persist_dir}")
 
     # Write run manifest
     manifest = {
