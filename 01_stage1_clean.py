@@ -1,30 +1,40 @@
 ﻿from pathlib import Path
 import argparse
+import sys
 from common import (
+    configure_stdout,
+    extract_wikilinks,
+    iter_markdown_files,
     read_text,
     strip_yaml_frontmatter,
     normalize_markdown_light,
-    replace_wikilinks_and_collect,
     parse_yaml_frontmatter,
     write_text,
     sha256_text,
     parse_date_field,
 )
 
-def iter_md_files(root: Path, recursive: bool) -> list[Path]:
-    pattern = "**/*.md" if recursive else "*.md"
-    return sorted([p for p in root.glob(pattern) if p.is_file()])
-
+def _console_safe(s: str) -> str:
+    enc = sys.stdout.encoding or "utf-8"
+    return s.encode(enc, errors="replace").decode(enc, errors="replace")
 
 def process_file(src: Path, stage1_root: Path, rel_path: Path, args: argparse.Namespace) -> None:
     raw = read_text(src)
     body, yaml_block = strip_yaml_frontmatter(raw)
-    meta = parse_yaml_frontmatter(yaml_block or "")
+    yaml_error = None
+    try:
+        meta = parse_yaml_frontmatter(yaml_block or "")
+    except Exception as exc:
+        if args.yaml_mode == "strict":
+            raise
+        yaml_error = f"{type(exc).__name__}: {exc}"
+        meta = {}
     entry_date = parse_date_field(meta, "journal_entry_date")
     source_date = parse_date_field(meta, "note_creation_date")
 
     normalized = normalize_markdown_light(body)
-    replaced, out_links = replace_wikilinks_and_collect(normalized)
+    cleaned_text = normalized
+    out_links = extract_wikilinks(cleaned_text) if args.emit_links else []
 
     out_txt = stage1_root / rel_path
     out_txt = out_txt.with_suffix(".clean.txt")
@@ -33,18 +43,20 @@ def process_file(src: Path, stage1_root: Path, rel_path: Path, args: argparse.Na
     print("[stage_1] ---- summary ----")
     print(f"[stage_1] file={src.name}")
     print(f"[stage_1] yaml_present={'yes' if yaml_block else 'no'} | yaml_keys={len(meta)} | entry_date={entry_date} | source_date={source_date}")
-    print(f"[stage_1] chars_raw={len(raw)} | chars_body={len(body)} | chars_clean={len(replaced)}")
+    if yaml_error:
+        print(f"[stage_1] yaml_error={yaml_error}")
+    print(f"[stage_1] chars_raw={len(raw)} | chars_body={len(body)} | chars_clean={len(cleaned_text)}")
     print(f"[stage_1] out_links={len(out_links)}")
-    print(f"[stage_1] clean_hash={sha256_text(replaced)[:12]}")
+    print(f"[stage_1] clean_hash={sha256_text(cleaned_text)[:12]}")
     print("[stage_1] preview:")
-    print(replaced[:300].replace("\n", "\\n"))
+    print(_console_safe(cleaned_text[:300].replace("\n", "\\n")))
 
     if args.dry_run:
         print("[stage_1] dry_run=True (no write performed)")
         return
 
     out_txt.parent.mkdir(parents=True, exist_ok=True)
-    write_text(out_txt, replaced)
+    write_text(out_txt, cleaned_text)
     print(f"[stage_1] wrote: {out_txt}")
 
     if args.emit_links:
@@ -54,12 +66,15 @@ def process_file(src: Path, stage1_root: Path, rel_path: Path, args: argparse.Na
 
 
 def main() -> None:
+    configure_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage0_path", type=str, help="Path to stage_0_raw file or folder")
     ap.add_argument("--stage0_md", type=str, help="(deprecated) Path to stage_0_raw/*.md")
     ap.add_argument("--stage1_dir", type=str, default="stage_1_clean", help="default=stage_1_clean")
     ap.add_argument("--emit_links", action="store_true", help="Write out_links JSON next to cleaned text")
     ap.add_argument("--no_recursive", action="store_true", help="If stage0_path is a folder, do not recurse")
+    ap.add_argument("--exclude", action="append", default=[], help="Glob to exclude (repeatable)")
+    ap.add_argument("--yaml_mode", type=str, choices=["strict", "lenient"], default="strict")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
 
@@ -73,15 +88,17 @@ def main() -> None:
     print(f"[stage_1_clean] args: {args}")
 
     if src_root.is_dir():
-        files = iter_md_files(src_root, recursive=not args.no_recursive)
-        if not files:
-            print("[stage_1] no markdown files found")
-            return
-        for src in files:
-            rel = src.relative_to(src_root)
-            process_file(src, stage1_root, rel, args)
+        files = iter_markdown_files(src_root, recursive=not args.no_recursive, exclude_globs=args.exclude, exclude_hidden=True)
     else:
-        process_file(src_root, stage1_root, Path(src_root.name), args)
+        files = iter_markdown_files(src_root, recursive=False, exclude_globs=args.exclude, exclude_hidden=True)
+
+    if not files:
+        print("[stage_1] no markdown files found")
+        return
+
+    for src in files:
+        rel = src.relative_to(src_root) if src_root.is_dir() else Path(src.name)
+        process_file(src, stage1_root, rel, args)
 
 
 if __name__ == "__main__":

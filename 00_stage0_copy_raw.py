@@ -2,11 +2,7 @@
 import argparse
 import shutil
 
-def iter_md_files(root: Path, recursive: bool) -> list[Path]:
-    if root.is_file():
-        return [root]
-    pattern = "**/*.md" if recursive else "*.md"
-    return sorted([p for p in root.glob(pattern) if p.is_file()])
+from common import iter_markdown_files
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -14,6 +10,7 @@ def main() -> None:
     ap.add_argument("--input_md", type=str, help="(deprecated) Path to ONE Obsidian .md note")
     ap.add_argument("--stage0_dir", type=str, default="stage_0_raw", help="Output folder for raw note copy")
     ap.add_argument("--no_recursive", action="store_true", help="If input_path is a folder, do not recurse")
+    ap.add_argument("--exclude", action="append", default=[], help="Glob to exclude (repeatable)")
     ap.add_argument("--dry_run", action="store_true", help="Print what would happen; do not copy")
     args = ap.parse_args()
 
@@ -26,7 +23,7 @@ def main() -> None:
         raise FileNotFoundError(f"Not found: {src_root}")
 
     recursive = not args.no_recursive
-    files = iter_md_files(src_root, recursive)
+    files = iter_markdown_files(src_root, recursive, args.exclude, exclude_hidden=True)
     if not files:
         print("[stage_0] no markdown files found")
         return

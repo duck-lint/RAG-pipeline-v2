@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(\|([^\]]+))?\]\]")  # [[Target]] or [[Target|Alias]]
 H2_RE = re.compile(r"^\s{0,3}##\s+(.*)$")  # split at H2 for V1
@@ -22,6 +23,11 @@ def sha256_text(s: str) -> str:
 
 def blake2b_hex(s: str, digest_size: int = 16) -> str:
     return hashlib.blake2b(s.encode("utf-8", errors="replace"), digest_size=digest_size).hexdigest()
+
+def stable_doc_id_from_rel_path(rel_path: Path, namespace: str = "obsidian") -> str:
+    rel_posix = rel_path.as_posix().lower()
+    key = f"{namespace}:{rel_posix}"
+    return sha256_text(key)[:24]
 
 def canonicalize_source_uri(source_uri: str) -> str:
     s = source_uri.strip().replace("\\", "/")
@@ -209,6 +215,17 @@ def replace_wikilinks_and_collect(text: str) -> Tuple[str, List[Dict[str, str]]]
     new_text = WIKILINK_RE.sub(_repl, text)
     return new_text, out_links
 
+def extract_wikilinks(text: str) -> List[str]:
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for m in WIKILINK_RE.finditer(text):
+        target = (m.group(1) or "").strip()
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        ordered.append(target)
+    return ordered
+
 HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.*)$")
 
 def split_into_sections(body_md: str) -> List[Tuple[str, str, List[str], str]]:
@@ -279,3 +296,44 @@ def write_jsonl(path: Path, rows: List[Dict[str, Any]]) -> None:
         for row in rows:
             f.write(json.dumps(row, ensure_ascii=False))
             f.write("\n")
+
+def configure_stdout(errors: str = "replace") -> None:
+    import sys
+    try:
+        sys.stdout.reconfigure(errors=errors)
+    except Exception:
+        pass
+
+def _is_hidden_path(path: Path) -> bool:
+    return any(part.startswith(".") for part in path.parts)
+
+def _matches_exclude_globs(path: Path, exclude_globs: Iterable[str]) -> bool:
+    path_posix = path.as_posix()
+    for pattern in exclude_globs:
+        pattern = pattern.replace("\\", "/")
+        if fnmatch.fnmatchcase(path_posix, pattern):
+            return True
+    return False
+
+def iter_markdown_files(
+    root: Path,
+    recursive: bool,
+    exclude_globs: Optional[Iterable[str]],
+    exclude_hidden: bool = True,
+) -> List[Path]:
+    if root.is_file():
+        candidates = [root] if root.suffix.lower() == ".md" else []
+    else:
+        pattern = "**/*.md" if recursive else "*.md"
+        candidates = sorted([p for p in root.glob(pattern) if p.is_file()])
+
+    excludes = [g for g in (exclude_globs or []) if g]
+    out: List[Path] = []
+    for path in candidates:
+        rel = Path(path.name) if root.is_file() else path.relative_to(root)
+        if exclude_hidden and _is_hidden_path(rel):
+            continue
+        if excludes and _matches_exclude_globs(rel, excludes):
+            continue
+        out.append(path)
+    return out

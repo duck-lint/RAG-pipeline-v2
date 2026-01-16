@@ -33,6 +33,9 @@ CHROMA_META_KEYS = [
     "embed_model",
     "embed_dim",
     "chunker_version",
+    "doc_type",
+    "sensitivity",
+    "folder",
 ]
 
 def stable_settings_hash(d: Dict[str, Any]) -> str:

@@ -1,7 +1,10 @@
 ﻿from pathlib import Path
 import argparse
 import re
+import sys
 from common import (
+    configure_stdout,
+    iter_markdown_files,
     read_text,
     strip_yaml_frontmatter,
     parse_yaml_frontmatter,
@@ -13,14 +16,14 @@ from common import (
     split_into_sections,
     parse_date_field,
     generate_chunk_identity,
+    stable_doc_id_from_rel_path,
 )
 
 CHUNKER_VERSION = "v0.1"
 
-
-def iter_md_files(root: Path, recursive: bool) -> list[Path]:
-    pattern = "**/*.md" if recursive else "*.md"
-    return sorted([p for p in root.glob(pattern) if p.is_file()])
+def _console_safe(s: str) -> str:
+    enc = sys.stdout.encoding or "utf-8"
+    return s.encode(enc, errors="replace").decode(enc, errors="replace")
 
 
 def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tuple[list[dict], Path, str]:
@@ -28,7 +31,14 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
     raw_text = raw_bytes.decode("utf-8", errors="replace")
 
     body, yaml_block = strip_yaml_frontmatter(raw_text)
-    meta = parse_yaml_frontmatter(yaml_block or "")
+    yaml_error = None
+    try:
+        meta = parse_yaml_frontmatter(yaml_block or "")
+    except Exception as exc:
+        if args.yaml_mode == "strict":
+            raise
+        yaml_error = f"{type(exc).__name__}: {exc}"
+        meta = {}
 
     if stage0_root.is_dir():
         rel = src.relative_to(stage0_root)
@@ -38,19 +48,23 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
     stage1_path = Path(args.stage1_dir).resolve() / rel
     stage1_path = stage1_path.with_suffix(".clean.txt")
 
-    if args.prefer_stage1:
-        if not stage1_path.exists():
-            raise FileNotFoundError(f"--prefer_stage1 set but stage1 file missing: {stage1_path}")
+    if args.prefer_stage1 and stage1_path.exists():
         chunk_input = read_text(stage1_path)
     else:
+        if args.prefer_stage1 and not stage1_path.exists():
+            print(f"[stage_2] warning: prefer_stage1 set but missing: {stage1_path} (falling back to stage0)")
         chunk_input = normalize_markdown_light(body)
 
-    doc_id = str(meta.get("uuid") or "").strip() or sha256_bytes(raw_bytes)[:24]  # V1 fallback
+    doc_id = str(meta.get("uuid") or "").strip() or stable_doc_id_from_rel_path(rel)
     rel_path = str(rel)
     source_uri = rel_path.replace("\\", "/")
     entry_date = parse_date_field(meta, "journal_entry_date")
     source_date = parse_date_field(meta, "note_creation_date")
     source_hash = sha256_bytes(raw_bytes)
+    parts = [p for p in rel.parts if p not in (".", "")]
+    folder = parts[0] if parts else ""
+    doc_type = str(meta.get("doc_type") or "").strip() or (folder.lower() if folder else "note")
+    sensitivity = str(meta.get("sensitivity") or "").strip() or "private"
 
     sections = split_into_sections(chunk_input)
 
@@ -122,10 +136,14 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
                     "source_date": source_date,
                     "source_hash": source_hash,
                     "content_hash": content_hash,
+                    "folder": folder,
+                    "doc_type": doc_type,
+                    "sensitivity": sensitivity,
                     "embed_model": args.embed_model,
                     "embed_dim": args.embed_dim,
                     "chunker_version": CHUNKER_VERSION,
                     "out_links": parts_links[idx],
+                    **({"yaml_error": yaml_error} if yaml_error else {}),
                 }
             })
             total_chunks += 1
@@ -141,6 +159,7 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
 
 
 def main() -> None:
+    configure_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage0_path", type=str, help="Path to stage_0_raw file or folder")
     ap.add_argument("--stage0_raw", type=str, help="(deprecated) Path to stage_0_raw/*.md")
@@ -153,6 +172,8 @@ def main() -> None:
     ap.add_argument("--stage1_dir", type=str, default="stage_1_clean")
     ap.add_argument("--prefer_stage1", action="store_true", help="Chunk from stage_1_clean if available")
     ap.add_argument("--no_recursive", action="store_true", help="If stage0_path is a folder, do not recurse")
+    ap.add_argument("--exclude", action="append", default=[], help="Glob to exclude (repeatable)")
+    ap.add_argument("--yaml_mode", type=str, choices=["strict", "lenient"], default="strict")
     args = ap.parse_args()
 
     src_arg = args.stage0_path or args.stage0_raw
@@ -160,22 +181,22 @@ def main() -> None:
         raise ValueError("Provide --stage0_path (file or folder) or --stage0_raw (deprecated).")
 
     stage0_root = Path(src_arg).resolve()
-    print(f"[stage_02_chunk] args: {args}")
+    print(f"[stage_2] args: {args}")
 
     if stage0_root.is_dir() and args.out_jsonl:
         raise ValueError("--out_jsonl is only valid for single-file input")
 
     if stage0_root.is_dir():
-        files = iter_md_files(stage0_root, recursive=not args.no_recursive)
+        files = iter_markdown_files(stage0_root, recursive=not args.no_recursive, exclude_globs=args.exclude, exclude_hidden=True)
     else:
-        files = [stage0_root]
+        files = iter_markdown_files(stage0_root, recursive=False, exclude_globs=args.exclude, exclude_hidden=True)
 
     if not files:
         print("[stage_2] no markdown files found")
         return
 
     for src in files:
-        print(f"[stage_02_chunk] src={src}")
+        print(f"[stage_2] src={src}")
         rows, out_path, summary = build_chunks(src, stage0_root, args)
 
         print("[stage_2] ---- summary ----")
@@ -184,7 +205,7 @@ def main() -> None:
         print(f"[stage_2] out_jsonl={out_path}")
         if rows:
             print("[stage_2] first_chunk_preview:")
-            print(rows[0]["text"][:220].replace("\n", "\\n"))
+            print(_console_safe(rows[0]["text"][:220].replace("\n", "\\n")))
 
         if args.dry_run:
             print("[stage_2] dry_run=True (no write performed)")
