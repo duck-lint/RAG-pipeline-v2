@@ -59,11 +59,15 @@ def generate_chunk_identity(
     heading_path: Any,
     chunk_index: int,
     cleaned_text: str,
+    section_ordinal: Optional[int] = None,
 ) -> Dict[str, str]:
     canon_source = canonicalize_source_uri(source_uri)
     canon_heading_list = canonicalize_heading_path(heading_path)
     canon_heading_str = " > ".join(canon_heading_list)
-    key_input = f"{canon_source}|{canon_heading_str}|{chunk_index}"
+    if section_ordinal is None:
+        key_input = f"{canon_source}|{canon_heading_str}|{chunk_index}"
+    else:
+        key_input = f"{canon_source}|{canon_heading_str}|{section_ordinal}|{chunk_index}"
     chunk_key = blake2b_hex(key_input)
     canon_text = canonicalize_cleaned_text(cleaned_text)
     chunk_hash = blake2b_hex(canon_text)

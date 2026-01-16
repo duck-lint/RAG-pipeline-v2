@@ -2,6 +2,7 @@
 import argparse
 import re
 import sys
+from collections import Counter, defaultdict
 from common import (
     configure_stdout,
     iter_markdown_files,
@@ -17,9 +18,16 @@ from common import (
     parse_date_field,
     generate_chunk_identity,
     stable_doc_id_from_rel_path,
+    canonicalize_heading_path,
 )
 
 CHUNKER_VERSION = "v0.1"
+
+def _infer_stage0_root_for_file(path: Path) -> Path:
+    for parent in path.parents:
+        if parent.name == "stage_0_raw":
+            return parent
+    return path.parent
 
 def _console_safe(s: str) -> str:
     enc = sys.stdout.encoding or "utf-8"
@@ -43,7 +51,8 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
     if stage0_root.is_dir():
         rel = src.relative_to(stage0_root)
     else:
-        rel = Path(src.name)
+        rel_root = _infer_stage0_root_for_file(src)
+        rel = src.relative_to(rel_root) if rel_root in src.parents else Path(src.name)
 
     stage1_path = Path(args.stage1_dir).resolve() / rel
     stage1_path = stage1_path.with_suffix(".clean.txt")
@@ -67,11 +76,19 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
     sensitivity = str(meta.get("sensitivity") or "").strip() or "private"
 
     sections = split_into_sections(chunk_input)
+    heading_counts = Counter(
+        " > ".join(canonicalize_heading_path(heading_path)) for _, _, heading_path, _ in sections
+    )
+    heading_seen: defaultdict[str, int] = defaultdict(int)
 
     rows = []
     total_chunks = 0
 
     for anchor, section_title, heading_path, section_raw in sections:
+        canon_heading_str = " > ".join(canonicalize_heading_path(heading_path))
+        ordinal = heading_seen[canon_heading_str]
+        heading_seen[canon_heading_str] += 1
+        section_ordinal = ordinal if heading_counts[canon_heading_str] > 1 else None
         # normalize then replace links per chunk
         normalized = normalize_markdown_light(section_raw)
 
@@ -112,7 +129,13 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
                     parts_links.append(chunk_links)
 
         for idx, chunk_text in enumerate(parts):
-            identity = generate_chunk_identity(source_uri, heading_path, idx, chunk_text)
+            identity = generate_chunk_identity(
+                source_uri,
+                heading_path,
+                idx,
+                chunk_text,
+                section_ordinal=section_ordinal,
+            )
             chunk_id = identity["chunk_id"]
             chunk_key = identity["chunk_key"]
             chunk_hash = identity["chunk_hash"]
@@ -210,6 +233,22 @@ def main() -> None:
         if args.dry_run:
             print("[stage_2] dry_run=True (no write performed)")
             continue
+
+        seen_ids: set[str] = set()
+        for row in rows:
+            cid = row.get("metadata", {}).get("chunk_id")
+            if not cid:
+                continue
+            if cid in seen_ids:
+                meta = row.get("metadata", {})
+                raise ValueError(
+                    "Duplicate chunk_id in output rows: "
+                    f"{cid} | source_uri={meta.get('source_uri')} | "
+                    f"chunk_anchor={meta.get('chunk_anchor')} | "
+                    f"chunk_title={meta.get('chunk_title')} | "
+                    f"chunk_index={meta.get('chunk_index')}"
+                )
+            seen_ids.add(cid)
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         write_jsonl(out_path, rows)

@@ -4,9 +4,17 @@ import argparse
 from pathlib import Path
 
 
-def iter_jsonl_files(root: Path, recursive: bool) -> list[Path]:
+def iter_jsonl_files(root: Path, recursive: bool, output_path: Path) -> list[Path]:
     pattern = "**/*.jsonl" if recursive else "*.jsonl"
-    return sorted([p for p in root.glob(pattern) if p.is_file()])
+    return sorted(
+        [
+            p
+            for p in root.glob(pattern)
+            if p.is_file()
+            and p.name.endswith(".chunks.jsonl")
+            and p.resolve() != output_path
+        ]
+    )
 
 
 def main() -> None:
@@ -37,12 +45,12 @@ def main() -> None:
     if not chunks_dir.is_dir():
         raise NotADirectoryError(f"chunks_dir must be a directory: {chunks_dir}")
 
-    files = iter_jsonl_files(chunks_dir, recursive=not args.no_recursive)
+    output_path = Path(args.output_jsonl).resolve()
+
+    files = iter_jsonl_files(chunks_dir, recursive=not args.no_recursive, output_path=output_path)
     if not files:
         print("[merge_chunks] no JSONL files found")
         return
-
-    output_path = Path(args.output_jsonl).resolve()
 
     print(f"[merge_chunks] chunks_dir={chunks_dir}")
     print(f"[merge_chunks] files={len(files)}")

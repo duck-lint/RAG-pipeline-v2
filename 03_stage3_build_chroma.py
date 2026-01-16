@@ -4,12 +4,14 @@ import argparse
 import json
 import shutil
 import hashlib
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Set, Tuple
 
 import chromadb
 from sentence_transformers import SentenceTransformer
 import torch
+from common import configure_stdout
 
 PIPELINE_VERSION = "v1"
 STAGE3_VERSION = "v0.1"
@@ -44,15 +46,13 @@ def stable_settings_hash(d: Dict[str, Any]) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
-def load_jsonl(path: Path) -> List[Dict[str, Any]]:
-    rows: List[Dict[str, Any]] = []
+def iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            rows.append(json.loads(line))
-    return rows
+            yield json.loads(line)
 
 
 def batch(iterable: List[Any], n: int) -> List[List[Any]]:
@@ -80,6 +80,7 @@ def get_existing_meta_by_id(collection: Any, ids: List[str]) -> Dict[str, Dict[s
 
 
 def main() -> None:
+    configure_stdout(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--chunks_jsonl", type=str, default="stage_2_chunks.jsonl", help="default=stage_2_chunks.jsonl")
     ap.add_argument("--persist_dir", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
@@ -91,6 +92,7 @@ def main() -> None:
     ap.add_argument("--reset_db", action="store_true", help="Delete persist_dir before building (rebuild only)")
     ap.add_argument("--mode", type=str, choices=["rebuild", "append", "upsert"], default="upsert")
     ap.add_argument("--skip_unchanged", action="store_true", help="When upserting, skip chunks whose hash hasn't changed")
+    ap.add_argument("--sync_deletes", action="store_true", help="Delete stale chunks not present in input (upsert only)")
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
 
@@ -105,6 +107,8 @@ def main() -> None:
         raise FileNotFoundError(f"Missing chunks file: {chunks_path}")
     if not args.collection or not args.collection.strip():
         raise ValueError("--collection must be a non-empty name")
+    if args.sync_deletes and args.mode != "upsert":
+        raise ValueError("--sync_deletes is only valid with --mode upsert")
 
     # Decide device
     if args.device == "auto":
@@ -112,7 +116,8 @@ def main() -> None:
     else:
         device = args.device
 
-    settings = {
+    required_keys = ["chunk_id", "chunk_key", "chunk_hash", "source_uri", "chunk_index", "cleaned_text"]
+    run_settings = {
         "pipeline_version": PIPELINE_VERSION,
         "stage3_version": STAGE3_VERSION,
         "chunks_jsonl": str(chunks_path),
@@ -123,61 +128,25 @@ def main() -> None:
         "batch_size": args.batch_size,
         "reset_db": args.reset_db,
         "mode": args.mode,
+        "skip_unchanged": args.skip_unchanged,
+        "sync_deletes": args.sync_deletes,
     }
-    settings_hash = stable_settings_hash(settings)
-
-    rows = load_jsonl(chunks_path)
-    ids = [r["metadata"]["chunk_id"] for r in rows]
-    docs = [r["text"] for r in rows]
-    metas = []
-    for r in rows:
-        m = r["metadata"]
-        heading_path = m.get("heading_path") or []
-        if isinstance(heading_path, list):
-            heading_path_str = " > ".join(heading_path)
-        else:
-            heading_path_str = str(heading_path)
-        base = {k: m.get(k) for k in CHROMA_META_KEYS if k != "heading_path_str" and m.get(k) is not None}
-        base["heading_path_str"] = heading_path_str
-        metas.append(base)
-
-    missing_meta = []
-    for idx, r in enumerate(rows):
-        m = r.get("metadata", {})
-        required_keys = ["chunk_id", "chunk_key", "chunk_hash", "source_uri", "chunk_index", "cleaned_text"]
-        missing = False
-        for k in required_keys:
-            if k not in m:
-                missing = True
-                break
-            if m.get(k) in (None, ""):
-                missing = True
-                break
-        heading_path = m.get("heading_path") or []
-        if isinstance(heading_path, list):
-            heading_path_str = " > ".join(heading_path)
-        else:
-            heading_path_str = str(heading_path)
-        if heading_path_str is None:
-            missing = True
-        if missing:
-            missing_meta.append(idx)
-            if len(missing_meta) >= 5:
-                break
-    if missing_meta:
-        raise ValueError(f"Missing required chunk metadata in rows: {missing_meta}")
-
-    # Basic sanity
-    if len(ids) != len(set(ids)):
-        raise ValueError("Duplicate chunk_id detected in stage_2_chunks.jsonl")
+    hash_settings = {
+        "pipeline_version": PIPELINE_VERSION,
+        "stage3_version": STAGE3_VERSION,
+        "embed_model": args.embed_model,
+        "normalize_embeddings": True,
+        "chroma_meta_keys": CHROMA_META_KEYS,
+        "required_keys": required_keys,
+    }
+    settings_hash = stable_settings_hash(hash_settings)
 
     print(
         f"[stage_3] start persist_dir={persist_dir} | collection={args.collection} | "
-        f"mode={args.mode} | docs={len(docs)} | chunks={len(rows)}"
+        f"mode={args.mode}"
     )
     print("[stage_3] ---- input summary ----")
     print(f"[stage_3] chunks_jsonl={chunks_path}")
-    print(f"[stage_3] rows={len(rows)}")
     print(f"[stage_3] embed_model={args.embed_model}")
     print(f"[stage_3] device={device} | cuda_available={torch.cuda.is_available()}")
     print(f"[stage_3] settings_hash={settings_hash}")
@@ -246,20 +215,28 @@ def main() -> None:
                     "Use --mode rebuild or a new --collection name."
                 )
 
-    if args.mode == "append":
-        existing = find_existing_ids(collection, ids, batch_size=min(args.batch_size, 256))
-        if existing:
-            sample = existing[:10]
-            raise ValueError(
-                f"Append mode found {len(existing)} duplicate ids. Sample: {sample}"
-            )
+    incoming_ids_by_doc: Dict[str, Set[str]] = {}
+    first_seen: Dict[str, Tuple[int, str]] = {}
+    rows_seen = 0
+    embedded_or_upserted = 0
+    skipped_unchanged = 0
 
-    # Embed and ingest in batches
-    total = 0
-    for idxs in batch(list(range(len(docs))), args.batch_size):
-        batch_docs = [docs[i] for i in idxs]
-        batch_ids = [ids[i] for i in idxs]
-        batch_metas = [metas[i] for i in idxs]
+    batch_ids: List[str] = []
+    batch_docs: List[str] = []
+    batch_metas: List[Dict[str, Any]] = []
+
+    def flush_batch() -> None:
+        nonlocal embedded_or_upserted, skipped_unchanged, batch_ids, batch_docs, batch_metas
+        if not batch_ids:
+            return
+
+        if args.mode == "append":
+            existing = find_existing_ids(collection, batch_ids, batch_size=len(batch_ids))
+            if existing:
+                sample = existing[:10]
+                raise ValueError(
+                    f"Append mode found {len(existing)} duplicate ids. Sample: {sample}"
+                )
 
         if args.mode == "upsert":
             if args.skip_unchanged:
@@ -270,15 +247,20 @@ def main() -> None:
                 for i, cid in enumerate(batch_ids):
                     prev = existing_meta.get(cid)
                     if prev and prev.get("chunk_hash") == batch_metas[i].get("chunk_hash"):
+                        skipped_unchanged += 1
                         continue
                     keep_ids.append(cid)
                     keep_docs.append(batch_docs[i])
                     keep_metas.append(batch_metas[i])
                 if not keep_ids:
-                    continue
+                    batch_ids = []
+                    batch_docs = []
+                    batch_metas = []
+                    return
                 batch_ids = keep_ids
                 batch_docs = keep_docs
                 batch_metas = keep_metas
+
             embeddings = model.encode(
                 batch_docs,
                 batch_size=min(args.batch_size, len(batch_docs)),
@@ -304,6 +286,7 @@ def main() -> None:
                     metadatas=batch_metas,
                     embeddings=embeddings_list,
                 )
+            embedded_or_upserted += len(batch_docs)
         else:
             embeddings = model.encode(
                 batch_docs,
@@ -318,21 +301,101 @@ def main() -> None:
                 metadatas=batch_metas,
                 embeddings=embeddings.tolist(),
             )
-        total += len(batch_docs)
+            embedded_or_upserted += len(batch_docs)
+
+        batch_ids = []
+        batch_docs = []
+        batch_metas = []
+
+    for r in iter_jsonl(chunks_path):
+        rows_seen += 1
+        m = r.get("metadata", {})
+        missing = False
+        for k in required_keys:
+            if k not in m or m.get(k) in (None, ""):
+                missing = True
+                break
+        heading_path = m.get("heading_path") or []
+        if isinstance(heading_path, list):
+            heading_path_str = " > ".join(heading_path)
+        else:
+            heading_path_str = str(heading_path)
+        if heading_path_str is None:
+            missing = True
+        if missing:
+            raise ValueError(f"Missing required chunk metadata at row {rows_seen}")
+
+        chunk_id = m["chunk_id"]
+        source_uri = str(m.get("source_uri") or "")
+        if chunk_id in first_seen:
+            first_row, first_uri = first_seen[chunk_id]
+            raise ValueError(
+                "Duplicate chunk_id detected: "
+                f"{chunk_id} at row {rows_seen} (source_uri={source_uri}); "
+                f"first seen at row {first_row} (source_uri={first_uri})"
+            )
+        first_seen[chunk_id] = (rows_seen, source_uri)
+
+        doc_id = m.get("doc_id")
+        if args.sync_deletes and not doc_id:
+            raise ValueError(f"sync_deletes requires doc_id at row {rows_seen}")
+        if doc_id:
+            incoming_ids_by_doc.setdefault(str(doc_id), set()).add(chunk_id)
+
+        base = {k: m.get(k) for k in CHROMA_META_KEYS if k != "heading_path_str" and m.get(k) is not None}
+        base["heading_path_str"] = heading_path_str
+
+        batch_ids.append(chunk_id)
+        batch_docs.append(r["text"])
+        batch_metas.append(base)
+
+        if len(batch_ids) >= args.batch_size:
+            flush_batch()
+
+    flush_batch()
+
+    docs_synced = 0
+    chunks_deleted = 0
+    if args.sync_deletes:
+        for doc_id, incoming_ids in incoming_ids_by_doc.items():
+            try:
+                res = collection.get(where={"doc_id": doc_id}, include=[])
+            except TypeError:
+                res = collection.get(where={"doc_id": doc_id})
+            existing_ids = set(res.get("ids", []))
+            to_delete = list(existing_ids - incoming_ids)
+            if not to_delete:
+                docs_synced += 1
+                continue
+            for idxs in batch(list(range(len(to_delete))), 256):
+                batch_del = [to_delete[i] for i in idxs]
+                collection.delete(ids=batch_del)
+                chunks_deleted += len(batch_del)
+            docs_synced += 1
+
+        print(f"[stage_3] sync_deletes docs_synced={docs_synced} | chunks_deleted={chunks_deleted}")
 
     print("[stage_3] ---- build summary ----")
-    print(f"[stage_3] wrote collection={args.collection} | total_added={total}")
+    print(f"[stage_3] wrote collection={args.collection} | total_added={embedded_or_upserted}")
     print(f"[stage_3] persist_dir={persist_dir}")
 
     # Write run manifest
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     manifest = {
         "pipeline_version": PIPELINE_VERSION,
         "stage3_version": STAGE3_VERSION,
-        "settings": settings,
+        "run_settings": run_settings,
+        "hash_settings": hash_settings,
         "settings_hash": settings_hash,
-        "counts": {"chunks": len(rows), "added": total},
+        "counts": {
+            "rows_seen": rows_seen,
+            "embedded_or_upserted": embedded_or_upserted,
+            "skipped_unchanged": skipped_unchanged,
+            "docs_synced": docs_synced,
+            "chunks_deleted": chunks_deleted,
+        },
     }
-    manifest_path = Path("run_manifest.json").resolve()
+    manifest_path = persist_dir / f"run_manifest_{ts}_{settings_hash}.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[stage_3] wrote manifest: {manifest_path}")
 

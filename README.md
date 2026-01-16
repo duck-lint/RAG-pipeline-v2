@@ -1,8 +1,43 @@
-# v2pipeline Usage
+# RAG Pipeline v2
 
-## Stage 3 ingestion modes
+Markdown-to-Chroma pipeline with four stages:
+1) copy raw notes, 2) clean, 3) chunk to JSONL, 4) embed + index.
 
-Rebuild (delete and recreate the collection; optionally reset the persist dir):
+## Quick start
+
+1) Initialize stage folders
+```bash
+python init_folders.py --root .
+```
+
+2) Stage 0: copy raw notes
+```bash
+python 00_stage0_copy_raw.py --input_path /path/to/vault --stage0_dir stage_0_raw
+```
+
+3) Stage 1: clean (preserves wikilinks)
+```bash
+python 01_stage1_clean.py --stage0_path stage_0_raw --stage1_dir stage_1_clean
+```
+
+4) Stage 2: chunk (prefer Stage 1 output)
+```bash
+python 02_stage2_chunk.py --stage0_path stage_0_raw --stage1_dir stage_1_clean --out_dir stage_2_chunks --prefer_stage1
+```
+
+5) Merge per-file JSONL into one
+```bash
+python merge_chunks_jsonl.py --chunks_dir stage_2_chunks --output_jsonl stage_2_chunks_merged.jsonl
+```
+
+6) Stage 3: build Chroma index
+```bash
+python 03_stage3_build_chroma.py --chunks_jsonl stage_2_chunks_merged.jsonl --persist_dir stage_3_chroma --collection v1_chunks --mode upsert
+```
+
+## Stage 3 modes
+
+Rebuild (delete and recreate the collection; optionally reset persist dir):
 ```bash
 python 03_stage3_build_chroma.py --chunks_jsonl stage_2_chunks_merged.jsonl --mode rebuild --reset_db
 ```
@@ -16,3 +51,42 @@ Upsert (default; overwrite existing ids when supported):
 ```bash
 python 03_stage3_build_chroma.py --chunks_jsonl stage_2_chunks_merged.jsonl --mode upsert
 ```
+
+Sync deletes (remove stale chunk_ids when chunks change):
+```bash
+python 03_stage3_build_chroma.py --chunks_jsonl stage_2_chunks_merged.jsonl --mode upsert --sync_deletes
+```
+
+## Common flags
+
+Stage 0/1/2 file discovery:
+- `--no_recursive` to disable recursion
+- `--exclude` (repeatable) to skip globs, e.g. `.obsidian/**`
+
+Stage 1/2 YAML behavior:
+- `--yaml_mode strict|lenient` (lenient logs `yaml_error` and continues)
+
+Stage 2 chunking:
+- `--prefer_stage1` uses `stage_1_clean` when present
+
+## Querying
+
+Basic query:
+```bash
+python query.py --persist_dir stage_3_chroma --collection v1_chunks --query "assumption ledger"
+```
+
+Exact-match filters:
+```bash
+python query.py --persist_dir stage_3_chroma --collection v1_chunks --query "assumption ledger" --doc_type inbox --folder INBOX
+```
+
+Prefix filter (post-filtered):
+```bash
+python query.py --persist_dir stage_3_chroma --collection v1_chunks --query "assumption ledger" --rel_path_prefix "INBOX/"
+```
+
+## Notes
+
+- `stage_2_chunks` contains per-file `*.chunks.jsonl`. `merge_chunks_jsonl.py` only merges those files.
+- `stage_3_chroma` is a Chroma persistent directory. Use a new `--persist_dir` for test runs if you hit file locks on Windows.
