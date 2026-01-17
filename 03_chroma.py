@@ -12,6 +12,14 @@ from sentence_transformers import SentenceTransformer
 import torch
 from common import configure_stdout
 
+_WARNED: set[str] = set()
+
+def _warn_deprecated(flag: str, replacement: str) -> None:
+    if flag in _WARNED:
+        return
+    _WARNED.add(flag)
+    print(f"[deprecation] {flag} is deprecated; use {replacement}")
+
 PIPELINE_VERSION = "v1"
 STAGE3_VERSION = "v0.1"
 
@@ -82,7 +90,8 @@ def main() -> None:
     configure_stdout(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--chunks_jsonl", type=str, default="stage_2_chunks.jsonl", help="default=stage_2_chunks.jsonl")
-    ap.add_argument("--persist_path", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
+    ap.add_argument("--persist_dir", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
+    ap.add_argument("--persist_path", type=str, help=argparse.SUPPRESS)
     ap.add_argument("--collection", type=str, default="v1_chunks", help="default=v1_chunks")
     ap.add_argument("--embed_model", type=str, default="sentence-transformers/all-MiniLM-L6-v2", help="default=sentence-transformers/all-MiniLM-L6-v2")
     ap.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda | default=auto")
@@ -95,11 +104,21 @@ def main() -> None:
 
     print(f"[stage_03_chroma] args: {args}")
 
+    persist_dir = args.persist_dir
+    if args.persist_path:
+        _warn_deprecated("--persist_path", "--persist_dir")
+        if args.persist_dir != "stage_3_chroma":
+            raise ValueError("Use only one of --persist_dir or --persist_path")
+        persist_dir = args.persist_path
+    args.persist_dir = persist_dir
+
     chunks_path = Path(args.chunks_jsonl).resolve()
-    persist_path = Path(args.persist_path).resolve()
+    persist_dir_path = Path(persist_dir).resolve()
 
     if not chunks_path.exists():
         raise FileNotFoundError(f"Missing chunks file: {chunks_path}")
+    if not chunks_path.is_file():
+        raise FileNotFoundError(f"chunks_jsonl must be a file: {chunks_path}")
     if not args.collection or not args.collection.strip():
         raise ValueError("--collection must be a non-empty name")
     if args.sync_deletes and args.mode != "upsert":
@@ -116,7 +135,7 @@ def main() -> None:
         "pipeline_version": PIPELINE_VERSION,
         "stage3_version": STAGE3_VERSION,
         "chunks_jsonl": str(chunks_path),
-        "persist_path": str(persist_path),
+        "persist_dir": str(persist_dir_path),
         "collection": args.collection,
         "embed_model": args.embed_model,
         "device": device,
@@ -136,7 +155,7 @@ def main() -> None:
     settings_hash = stable_settings_hash(hash_settings)
 
     print(
-        f"[stage_3] start persist_path={persist_path} | collection={args.collection} | "
+        f"[stage_3] start persist_dir={persist_dir_path} | collection={args.collection} | "
         f"mode={args.mode}"
     )
     print("[stage_3] ---- input summary ----")
@@ -149,13 +168,15 @@ def main() -> None:
         print("[stage_3] dry_run=True (not embedding / not writing DB)")
         return
 
-    persist_path.mkdir(parents=True, exist_ok=True)
+    if persist_dir_path.exists() and not persist_dir_path.is_dir():
+        raise NotADirectoryError(f"persist_dir must be a directory: {persist_dir_path}")
+    persist_dir_path.mkdir(parents=True, exist_ok=True)
 
     # Initialize model
     model = SentenceTransformer(args.embed_model, device=device)
 
     # Create Chroma persistent client
-    client = chromadb.PersistentClient(path=str(persist_path))
+    client = chromadb.PersistentClient(path=str(persist_dir_path))
 
     if args.mode == "rebuild":
         try:
@@ -366,7 +387,7 @@ def main() -> None:
 
     print("[stage_3] ---- build summary ----")
     print(f"[stage_3] wrote collection={args.collection} | total_added={embedded_or_upserted}")
-    print(f"[stage_3] persist_path={persist_path}")
+    print(f"[stage_3] persist_dir={persist_dir_path}")
 
     # Write run manifest
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -384,7 +405,7 @@ def main() -> None:
             "chunks_deleted": chunks_deleted,
         },
     }
-    manifest_path = persist_path / f"run_manifest_{ts}_{settings_hash}.json"
+    manifest_path = persist_dir_path / f"run_manifest_{ts}_{settings_hash}.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[stage_3] wrote manifest: {manifest_path}")
 

@@ -3,6 +3,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+_WARNED: set[str] = set()
+
+def _warn_deprecated(flag: str, replacement: str) -> None:
+    if flag in _WARNED:
+        return
+    _WARNED.add(flag)
+    print(f"[deprecation] {flag} is deprecated; use {replacement}")
+
 
 def iter_jsonl_files(root: Path, recursive: bool, output_path: Path) -> list[Path]:
     pattern = "**/*.jsonl" if recursive else "*.jsonl"
@@ -20,16 +28,16 @@ def iter_jsonl_files(root: Path, recursive: bool, output_path: Path) -> list[Pat
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
-        "--chunks_path",
+        "--chunks_dir",
         type=str,
-        default="stage_2_chunks",
         help="Folder containing per-file JSONL chunks",
     )
+    ap.add_argument("--chunks_path", type=str, help=argparse.SUPPRESS)
     ap.add_argument(
         "--output_jsonl",
         type=str,
-        default="stage_2_chunks_merged.jsonl",
         help="Output JSONL path",
+        required=True,
     )
     ap.add_argument(
         "--no_recursive",
@@ -39,20 +47,31 @@ def main() -> None:
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
 
-    chunks_path = Path(args.chunks_path).resolve()
-    if not chunks_path.exists():
-        raise FileNotFoundError(f"Missing chunks_path: {chunks_path}")
-    if not chunks_path.is_dir():
-        raise NotADirectoryError(f"chunks_path must be a directory: {chunks_path}")
+    chunks_dir = args.chunks_dir
+    if args.chunks_path:
+        _warn_deprecated("--chunks_path", "--chunks_dir")
+        if args.chunks_dir:
+            raise ValueError("Use only one of --chunks_dir or --chunks_path")
+        chunks_dir = args.chunks_path
+    args.chunks_dir = chunks_dir
+
+    if not chunks_dir:
+        raise ValueError("--chunks_dir is required")
+
+    chunks_dir_path = Path(chunks_dir).resolve()
+    if not chunks_dir_path.exists():
+        raise FileNotFoundError(f"Missing chunks_dir: {chunks_dir_path}")
+    if not chunks_dir_path.is_dir():
+        raise NotADirectoryError(f"chunks_dir must be a directory: {chunks_dir_path}")
 
     output_path = Path(args.output_jsonl).resolve()
 
-    files = iter_jsonl_files(chunks_path, recursive=not args.no_recursive, output_path=output_path)
+    files = iter_jsonl_files(chunks_dir_path, recursive=not args.no_recursive, output_path=output_path)
     if not files:
         print("[merge_chunks] no JSONL files found")
         return
 
-    print(f"[merge_chunks] chunks_path={chunks_path}")
+    print(f"[merge_chunks] chunks_dir={chunks_dir_path}")
     print(f"[merge_chunks] files={len(files)}")
     print(f"[merge_chunks] output_jsonl={output_path}")
 

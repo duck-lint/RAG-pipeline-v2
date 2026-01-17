@@ -32,27 +32,27 @@ python init_folders.py --root .
 
 2) Stage 0: copy raw notes
 ```bash
-python 00_copy_raw.py --input_path /path/to/vault --stage0_path stage_0_raw
+python 00_copy_raw.py --input_path /path/to/vault --stage0_dir stage_0_raw
 ```
 
 3) Stage 1: clean (preserves wikilinks)
 ```bash
-python 01_clean.py --stage0_path stage_0_raw --stage1_path stage_1_clean
+python 01_clean.py --stage0_path stage_0_raw --stage1_dir stage_1_clean
 ```
 
 4) Stage 2: chunk (prefer Stage 1 output)
 ```bash
-python 02_chunk.py --stage0_path stage_0_raw --stage1_path stage_1_clean --out_path stage_2_chunks --prefer_stage1
+python 02_chunk.py --stage0_path stage_0_raw --stage1_dir stage_1_clean --out_dir stage_2_chunks --prefer_stage1
 ```
 
 5) Merge per-file JSONL into one
 ```bash
-python merge_chunks_jsonl.py --chunks_path stage_2_chunks --output_jsonl stage_2_chunks_merged.jsonl
+python merge_chunks_jsonl.py --chunks_dir stage_2_chunks --output_jsonl stage_2_chunks_merged.jsonl
 ```
 
 6) Stage 3: build Chroma index
 ```bash
-python 03_chroma.py --chunks_jsonl stage_2_chunks_merged.jsonl --persist_path stage_3_chroma --collection v1_chunks --mode upsert
+python 03_chroma.py --chunks_jsonl stage_2_chunks_merged.jsonl --persist_dir stage_3_chroma --collection v1_chunks --mode upsert
 ```
 
 ## Stage 3 modes
@@ -93,20 +93,23 @@ Stage 2 chunking:
 
 Basic query:
 ```bash
-python query.py --persist_path stage_3_chroma --collection v1_chunks --query "assumption ledger"
+python query.py --persist_dir stage_3_chroma --collection v1_chunks --query "assumption ledger"
 ```
 
 Exact-match filters:
 ```bash
-python query.py --persist_path stage_3_chroma --collection v1_chunks --query "assumption ledger" --doc_type inbox --folder INBOX
+python query.py --persist_dir stage_3_chroma --collection v1_chunks --query "assumption ledger" --doc_type inbox --folder INBOX
 ```
 
 Prefix filter (post-filtered):
 ```bash
-python query.py --persist_path stage_3_chroma --collection v1_chunks --query "assumption ledger" --rel_path_prefix "INBOX/"
+python query.py --persist_dir stage_3_chroma --collection v1_chunks --query "assumption ledger" --rel_path_prefix "INBOX/"
 ```
 
 ## Notes
 
 - `stage_2_chunks` contains per-file `*.chunks.jsonl`. `merge_chunks_jsonl.py` only merges those files.
-- `stage_3_chroma` is a Chroma persistent directory. Use a new `--persist_path` for test runs if you hit file locks on Windows.
+- `stage_3_chroma` is a Chroma persistent directory. Use a new `--persist_dir` for test runs if you hit file locks on Windows.
+- Naming convention:
+- `*_path` is a file path or file-or-folder input.
+- `*_dir` is always a directory.

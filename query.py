@@ -9,6 +9,14 @@ from sentence_transformers import SentenceTransformer
 import torch
 from common import configure_stdout
 
+_WARNED: set[str] = set()
+
+def _warn_deprecated(flag: str, replacement: str) -> None:
+    if flag in _WARNED:
+        return
+    _WARNED.add(flag)
+    print(f"[deprecation] {flag} is deprecated; use {replacement}")
+
 
 def preview(text: str, n: int = 180) -> str:
     t = " ".join(text.split())  # collapse whitespace for display only
@@ -18,7 +26,8 @@ def preview(text: str, n: int = 180) -> str:
 def main() -> None:
     configure_stdout(errors="replace")
     ap = argparse.ArgumentParser()
-    ap.add_argument("--persist_path", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
+    ap.add_argument("--persist_dir", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
+    ap.add_argument("--persist_path", type=str, help=argparse.SUPPRESS)
     ap.add_argument("--collection", type=str, default="v1_chunks", help="default=v1_chunks")
     ap.add_argument("--query", type=str, required=True, help="required=True")
     ap.add_argument("--k", type=int, default=5, help="default=5")
@@ -41,11 +50,21 @@ def main() -> None:
     else:
         device = args.device
 
-    persist_path = Path(args.persist_path).resolve()
-    if not persist_path.exists():
-        raise FileNotFoundError(f"Missing persist_path: {persist_path}")
+    persist_dir = args.persist_dir
+    if args.persist_path:
+        _warn_deprecated("--persist_path", "--persist_dir")
+        if args.persist_dir != "stage_3_chroma":
+            raise ValueError("Use only one of --persist_dir or --persist_path")
+        persist_dir = args.persist_path
+    args.persist_dir = persist_dir
 
-    client = chromadb.PersistentClient(path=str(persist_path))
+    persist_dir_path = Path(persist_dir).resolve()
+    if not persist_dir_path.exists():
+        raise FileNotFoundError(f"Missing persist_dir: {persist_dir_path}")
+    if not persist_dir_path.is_dir():
+        raise NotADirectoryError(f"persist_dir must be a directory: {persist_dir_path}")
+
+    client = chromadb.PersistentClient(path=str(persist_dir_path))
     collection = client.get_collection(name=args.collection)
 
     model = SentenceTransformer(args.embed_model, device=device)

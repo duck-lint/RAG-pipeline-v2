@@ -14,6 +14,14 @@ from common import (
     parse_date_field,
 )
 
+_WARNED: set[str] = set()
+
+def _warn_deprecated(flag: str, replacement: str) -> None:
+    if flag in _WARNED:
+        return
+    _WARNED.add(flag)
+    print(f"[deprecation] {flag} is deprecated; use {replacement}")
+
 def _console_safe(s: str) -> str:
     enc = sys.stdout.encoding or "utf-8"
     return s.encode(enc, errors="replace").decode(enc, errors="replace")
@@ -69,7 +77,8 @@ def main() -> None:
     configure_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage0_path", type=str, required=True, help="Path to stage_0_raw file or folder")
-    ap.add_argument("--stage1_path", type=str, default="stage_1_clean", help="default=stage_1_clean")
+    ap.add_argument("--stage1_dir", type=str, default="stage_1_clean", help="default=stage_1_clean")
+    ap.add_argument("--stage1_path", type=str, help=argparse.SUPPRESS)
     ap.add_argument("--emit_links", action="store_true", help="Write out_links JSON next to cleaned text")
     ap.add_argument("--no_recursive", action="store_true", help="If stage0_path is a folder, do not recurse")
     ap.add_argument("--exclude", action="append", default=[], help="Glob to exclude (repeatable)")
@@ -77,8 +86,21 @@ def main() -> None:
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
 
+    stage1_dir = args.stage1_dir
+    if args.stage1_path:
+        _warn_deprecated("--stage1_path", "--stage1_dir")
+        if args.stage1_dir != "stage_1_clean":
+            raise ValueError("Use only one of --stage1_dir or --stage1_path")
+        stage1_dir = args.stage1_path
+    args.stage1_dir = stage1_dir
+
     src_root = Path(args.stage0_path).resolve()
-    stage1_root = Path(args.stage1_path).resolve()
+    if not src_root.exists():
+        raise FileNotFoundError(f"Missing stage0_path: {src_root}")
+    if src_root.exists() and not src_root.is_dir() and not src_root.is_file():
+        raise ValueError(f"stage0_path must be a file or directory: {src_root}")
+
+    stage1_root = Path(stage1_dir).resolve()
 
     print(f"[stage_1_clean] args: {args}")
 
@@ -90,6 +112,11 @@ def main() -> None:
     if not files:
         print("[stage_1] no markdown files found")
         return
+
+    if not args.dry_run:
+        if stage1_root.exists() and not stage1_root.is_dir():
+            raise NotADirectoryError(f"stage1_dir must be a directory: {stage1_root}")
+        stage1_root.mkdir(parents=True, exist_ok=True)
 
     for src in files:
         rel = src.relative_to(src_root) if src_root.is_dir() else Path(src.name)

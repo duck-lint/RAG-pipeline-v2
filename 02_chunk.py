@@ -24,6 +24,14 @@ from common import (
 
 CHUNKER_VERSION = "v0.1"
 
+_WARNED: set[str] = set()
+
+def _warn_deprecated(flag: str, replacement: str) -> None:
+    if flag in _WARNED:
+        return
+    _WARNED.add(flag)
+    print(f"[deprecation] {flag} is deprecated; use {replacement}")
+
 def _infer_stage0_root_for_file(path: Path) -> Path:
     for parent in path.parents:
         if parent.name == "stage_0_raw":
@@ -55,7 +63,7 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
         rel_root = _infer_stage0_root_for_file(src)
         rel = src.relative_to(rel_root) if rel_root in src.parents else Path(src.name)
 
-    stage1_path = Path(args.stage1_path).resolve() / rel
+    stage1_path = Path(args.stage1_dir).resolve() / rel
     stage1_path = stage1_path.with_suffix(".clean.txt")
 
     if args.prefer_stage1 and stage1_path.exists():
@@ -174,7 +182,7 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
             })
             total_chunks += 1
 
-    out_path = Path(args.out_path).resolve() / rel
+    out_path = Path(args.out_dir).resolve() / rel
     out_path = out_path.with_suffix(".chunks.jsonl")
 
     summary = f"sections={len(sections)} | chunks={total_chunks}"
@@ -185,18 +193,49 @@ def main() -> None:
     configure_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage0_path", type=str, required=True, help="Path to stage_0_raw file or folder")
-    ap.add_argument("--out_path", type=str, default="stage_2_chunks", help="Output folder for per-file JSONL")
+    ap.add_argument("--stage1_dir", type=str, default="stage_1_clean")
+    ap.add_argument("--out_dir", type=str, default="stage_2_chunks", help="Output folder for per-file JSONL")
+    ap.add_argument("--stage1_path", type=str, help=argparse.SUPPRESS)
+    ap.add_argument("--out_path", type=str, help=argparse.SUPPRESS)
     ap.add_argument("--max_chars", type=int, default=2500, help="Split section if longer than this (V1 safety)")
     ap.add_argument("--dry_run", action="store_true")
-    ap.add_argument("--stage1_path", type=str, default="stage_1_clean")
     ap.add_argument("--prefer_stage1", action="store_true", help="Chunk from stage_1_clean if available")
     ap.add_argument("--no_recursive", action="store_true", help="If stage0_path is a folder, do not recurse")
     ap.add_argument("--exclude", action="append", default=[], help="Glob to exclude (repeatable)")
     ap.add_argument("--yaml_mode", type=str, choices=["strict", "lenient"], default="strict")
     args = ap.parse_args()
 
+    stage1_dir = args.stage1_dir
+    if args.stage1_path:
+        _warn_deprecated("--stage1_path", "--stage1_dir")
+        if args.stage1_dir != "stage_1_clean":
+            raise ValueError("Use only one of --stage1_dir or --stage1_path")
+        stage1_dir = args.stage1_path
+
+    out_dir = args.out_dir
+    if args.out_path:
+        _warn_deprecated("--out_path", "--out_dir")
+        if args.out_dir != "stage_2_chunks":
+            raise ValueError("Use only one of --out_dir or --out_path")
+        out_dir = args.out_path
+
+    args.stage1_dir = stage1_dir
+    args.out_dir = out_dir
+
     stage0_root = Path(args.stage0_path).resolve()
     print(f"[stage_2] args: {args}")
+    if not stage0_root.exists():
+        raise FileNotFoundError(f"Missing stage0_path: {stage0_root}")
+    if stage0_root.exists() and not stage0_root.is_dir() and not stage0_root.is_file():
+        raise ValueError(f"stage0_path must be a file or directory: {stage0_root}")
+
+    stage1_root = Path(stage1_dir).resolve()
+    if not stage1_root.exists() or not stage1_root.is_dir():
+        raise NotADirectoryError(f"stage1_dir must be a directory: {stage1_root}")
+
+    out_root = Path(out_dir).resolve()
+    if out_root.exists() and not out_root.is_dir():
+        raise NotADirectoryError(f"out_dir must be a directory: {out_root}")
 
     if stage0_root.is_dir():
         files = iter_markdown_files(stage0_root, recursive=not args.no_recursive, exclude_globs=args.exclude, exclude_hidden=True)
@@ -206,6 +245,9 @@ def main() -> None:
     if not files:
         print("[stage_2] no markdown files found")
         return
+
+    if not args.dry_run:
+        out_root.mkdir(parents=True, exist_ok=True)
 
     for src in files:
         print(f"[stage_2] src={src}")
