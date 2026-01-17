@@ -3,6 +3,22 @@
 Markdown-to-Chroma pipeline with four stages:
 1) copy raw notes, 2) clean, 3) chunk to JSONL, 4) embed + index.
 
+## Environment (Python 3.11)
+
+Use a Python 3.11 virtual environment for this repo. Stage 3 CUDA only works if you run
+inside the venv that has the CUDA-enabled torch build.
+
+```bash
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+# Install CUDA-enabled torch (pick the CUDA build that matches your driver)
+# Common picks: cu118, cu121, cu130. See https://pytorch.org/get-started/locally/
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+python -c "import torch; print('cuda available:', torch.cuda.is_available())"
+```
+
 ## Quick start
 
 1) Initialize stage folders
