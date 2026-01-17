@@ -82,7 +82,7 @@ def main() -> None:
     configure_stdout(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("--chunks_jsonl", type=str, default="stage_2_chunks.jsonl", help="default=stage_2_chunks.jsonl")
-    ap.add_argument("--persist_dir", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
+    ap.add_argument("--persist_path", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
     ap.add_argument("--collection", type=str, default="v1_chunks", help="default=v1_chunks")
     ap.add_argument("--embed_model", type=str, default="sentence-transformers/all-MiniLM-L6-v2", help="default=sentence-transformers/all-MiniLM-L6-v2")
     ap.add_argument("--device", type=str, default="auto", help="auto|cpu|cuda | default=auto")
@@ -96,7 +96,7 @@ def main() -> None:
     print(f"[stage_03_chroma] args: {args}")
 
     chunks_path = Path(args.chunks_jsonl).resolve()
-    persist_dir = Path(args.persist_dir).resolve()
+    persist_path = Path(args.persist_path).resolve()
 
     if not chunks_path.exists():
         raise FileNotFoundError(f"Missing chunks file: {chunks_path}")
@@ -116,7 +116,7 @@ def main() -> None:
         "pipeline_version": PIPELINE_VERSION,
         "stage3_version": STAGE3_VERSION,
         "chunks_jsonl": str(chunks_path),
-        "persist_dir": str(persist_dir),
+        "persist_path": str(persist_path),
         "collection": args.collection,
         "embed_model": args.embed_model,
         "device": device,
@@ -136,7 +136,7 @@ def main() -> None:
     settings_hash = stable_settings_hash(hash_settings)
 
     print(
-        f"[stage_3] start persist_dir={persist_dir} | collection={args.collection} | "
+        f"[stage_3] start persist_path={persist_path} | collection={args.collection} | "
         f"mode={args.mode}"
     )
     print("[stage_3] ---- input summary ----")
@@ -149,13 +149,13 @@ def main() -> None:
         print("[stage_3] dry_run=True (not embedding / not writing DB)")
         return
 
-    persist_dir.mkdir(parents=True, exist_ok=True)
+    persist_path.mkdir(parents=True, exist_ok=True)
 
     # Initialize model
     model = SentenceTransformer(args.embed_model, device=device)
 
     # Create Chroma persistent client
-    client = chromadb.PersistentClient(path=str(persist_dir))
+    client = chromadb.PersistentClient(path=str(persist_path))
 
     if args.mode == "rebuild":
         try:
@@ -366,7 +366,7 @@ def main() -> None:
 
     print("[stage_3] ---- build summary ----")
     print(f"[stage_3] wrote collection={args.collection} | total_added={embedded_or_upserted}")
-    print(f"[stage_3] persist_dir={persist_dir}")
+    print(f"[stage_3] persist_path={persist_path}")
 
     # Write run manifest
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -384,7 +384,7 @@ def main() -> None:
             "chunks_deleted": chunks_deleted,
         },
     }
-    manifest_path = persist_dir / f"run_manifest_{ts}_{settings_hash}.json"
+    manifest_path = persist_path / f"run_manifest_{ts}_{settings_hash}.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[stage_3] wrote manifest: {manifest_path}")
 

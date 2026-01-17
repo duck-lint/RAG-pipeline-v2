@@ -1,11 +1,11 @@
 import chromadb
 from pathlib import Path
 
-PERSIST_DIR = r"path\to\dir"
+PERSIST_PATH = r"path\to\dir"
 COLLECTION = "v1_chunks"
 DOC_ID = "doc_id"
 
-client = chromadb.PersistentClient(path=str(Path(PERSIST_DIR)))
+client = chromadb.PersistentClient(path=str(Path(PERSIST_PATH)))
 coll = client.get_collection(name=COLLECTION)
 
 try:

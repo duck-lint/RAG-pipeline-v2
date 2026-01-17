@@ -69,7 +69,7 @@ def main() -> None:
     configure_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage0_path", type=str, required=True, help="Path to stage_0_raw file or folder")
-    ap.add_argument("--stage1_dir", type=str, default="stage_1_clean", help="default=stage_1_clean")
+    ap.add_argument("--stage1_path", type=str, default="stage_1_clean", help="default=stage_1_clean")
     ap.add_argument("--emit_links", action="store_true", help="Write out_links JSON next to cleaned text")
     ap.add_argument("--no_recursive", action="store_true", help="If stage0_path is a folder, do not recurse")
     ap.add_argument("--exclude", action="append", default=[], help="Glob to exclude (repeatable)")
@@ -78,7 +78,7 @@ def main() -> None:
     args = ap.parse_args()
 
     src_root = Path(args.stage0_path).resolve()
-    stage1_root = Path(args.stage1_dir).resolve()
+    stage1_root = Path(args.stage1_path).resolve()
 
     print(f"[stage_1_clean] args: {args}")
 

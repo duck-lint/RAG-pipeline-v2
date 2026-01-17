@@ -55,7 +55,7 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
         rel_root = _infer_stage0_root_for_file(src)
         rel = src.relative_to(rel_root) if rel_root in src.parents else Path(src.name)
 
-    stage1_path = Path(args.stage1_dir).resolve() / rel
+    stage1_path = Path(args.stage1_path).resolve() / rel
     stage1_path = stage1_path.with_suffix(".clean.txt")
 
     if args.prefer_stage1 and stage1_path.exists():
@@ -174,7 +174,7 @@ def build_chunks(src: Path, stage0_root: Path, args: argparse.Namespace) -> tupl
             })
             total_chunks += 1
 
-    out_path = Path(args.out_dir).resolve() / rel
+    out_path = Path(args.out_path).resolve() / rel
     out_path = out_path.with_suffix(".chunks.jsonl")
 
     summary = f"sections={len(sections)} | chunks={total_chunks}"
@@ -185,10 +185,10 @@ def main() -> None:
     configure_stdout()
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage0_path", type=str, required=True, help="Path to stage_0_raw file or folder")
-    ap.add_argument("--out_dir", type=str, default="stage_2_chunks", help="Output folder for per-file JSONL")
+    ap.add_argument("--out_path", type=str, default="stage_2_chunks", help="Output folder for per-file JSONL")
     ap.add_argument("--max_chars", type=int, default=2500, help="Split section if longer than this (V1 safety)")
     ap.add_argument("--dry_run", action="store_true")
-    ap.add_argument("--stage1_dir", type=str, default="stage_1_clean")
+    ap.add_argument("--stage1_path", type=str, default="stage_1_clean")
     ap.add_argument("--prefer_stage1", action="store_true", help="Chunk from stage_1_clean if available")
     ap.add_argument("--no_recursive", action="store_true", help="If stage0_path is a folder, do not recurse")
     ap.add_argument("--exclude", action="append", default=[], help="Glob to exclude (repeatable)")

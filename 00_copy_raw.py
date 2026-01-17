@@ -7,7 +7,7 @@ from common import iter_markdown_files
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input_path", type=str, required=True, help="Path to a markdown file or a folder")
-    ap.add_argument("--stage0_dir", type=str, default="stage_0_raw", help="Output folder for raw note copy")
+    ap.add_argument("--stage0_path", type=str, default="stage_0_raw", help="Output folder for raw note copy")
     ap.add_argument("--no_recursive", action="store_true", help="If input_path is a folder, do not recurse")
     ap.add_argument("--exclude", action="append", default=[], help="Glob to exclude (repeatable)")
     ap.add_argument("--dry_run", action="store_true", help="Print what would happen; do not copy")
@@ -23,7 +23,7 @@ def main() -> None:
         print("[stage_0] no markdown files found")
         return
 
-    dst_root = Path(args.stage0_dir).expanduser().resolve()
+    dst_root = Path(args.stage0_path).expanduser().resolve()
 
     print("[stage_0] copy markdown file(s) to stage_0_raw/")
     print(f"[stage_0] args: {args}")

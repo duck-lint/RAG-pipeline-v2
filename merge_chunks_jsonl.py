@@ -20,7 +20,7 @@ def iter_jsonl_files(root: Path, recursive: bool, output_path: Path) -> list[Pat
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
-        "--chunks_dir",
+        "--chunks_path",
         type=str,
         default="stage_2_chunks",
         help="Folder containing per-file JSONL chunks",
@@ -39,20 +39,20 @@ def main() -> None:
     ap.add_argument("--dry_run", action="store_true")
     args = ap.parse_args()
 
-    chunks_dir = Path(args.chunks_dir).resolve()
-    if not chunks_dir.exists():
-        raise FileNotFoundError(f"Missing chunks_dir: {chunks_dir}")
-    if not chunks_dir.is_dir():
-        raise NotADirectoryError(f"chunks_dir must be a directory: {chunks_dir}")
+    chunks_path = Path(args.chunks_path).resolve()
+    if not chunks_path.exists():
+        raise FileNotFoundError(f"Missing chunks_path: {chunks_path}")
+    if not chunks_path.is_dir():
+        raise NotADirectoryError(f"chunks_path must be a directory: {chunks_path}")
 
     output_path = Path(args.output_jsonl).resolve()
 
-    files = iter_jsonl_files(chunks_dir, recursive=not args.no_recursive, output_path=output_path)
+    files = iter_jsonl_files(chunks_path, recursive=not args.no_recursive, output_path=output_path)
     if not files:
         print("[merge_chunks] no JSONL files found")
         return
 
-    print(f"[merge_chunks] chunks_dir={chunks_dir}")
+    print(f"[merge_chunks] chunks_path={chunks_path}")
     print(f"[merge_chunks] files={len(files)}")
     print(f"[merge_chunks] output_jsonl={output_path}")
 
