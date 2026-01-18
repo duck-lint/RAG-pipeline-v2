@@ -3,7 +3,11 @@
 import argparse
 import json
 import hashlib
-from datetime import datetime
+import socket
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Set, Tuple
 
@@ -52,6 +56,41 @@ def stable_settings_hash(d: Dict[str, Any]) -> str:
     blob = json.dumps(d, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def get_git_info(start_dir: Path) -> Tuple[Any, Any]:
+    try:
+        repo_root_str = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=start_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        repo_root = Path(repo_root_str).resolve()
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        return commit, bool(dirty)
+    except Exception:
+        return None, None
+
 
 def iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:
     with path.open("r", encoding="utf-8") as f:
@@ -88,6 +127,8 @@ def get_existing_meta_by_id(collection: Any, ids: List[str]) -> Dict[str, Dict[s
 
 def main() -> None:
     configure_stdout(errors="replace")
+    start_dt = datetime.now(timezone.utc)
+    start_perf = time.perf_counter()
     ap = argparse.ArgumentParser()
     ap.add_argument("--chunks_jsonl", type=str, default="stage_2_chunks.jsonl", help="default=stage_2_chunks.jsonl")
     ap.add_argument("--persist_dir", type=str, default="stage_3_chroma", help="default=stage_3_chroma")
@@ -130,20 +171,31 @@ def main() -> None:
     else:
         device = args.device
 
-    required_keys = ["chunk_id", "chunk_key", "chunk_hash", "source_uri", "chunk_index", "cleaned_text"]
-    run_settings = {
-        "pipeline_version": PIPELINE_VERSION,
-        "stage3_version": STAGE3_VERSION,
-        "chunks_jsonl": str(chunks_path),
-        "persist_dir": str(persist_dir_path),
+    index_settings = {
+        "persist_dir_abs": str(persist_dir_path),
         "collection": args.collection,
         "embed_model": args.embed_model,
         "device": device,
         "batch_size": args.batch_size,
         "mode": args.mode,
-        "skip_unchanged": args.skip_unchanged,
         "sync_deletes": args.sync_deletes,
+        "skip_unchanged": args.skip_unchanged,
     }
+    settings_for_hash = {
+        "collection": args.collection,
+        "embed_model": args.embed_model,
+        "device": device,
+        "batch_size": args.batch_size,
+        "mode": args.mode,
+        "sync_deletes": args.sync_deletes,
+        "skip_unchanged": args.skip_unchanged,
+    }
+    settings_hash_full = hashlib.sha256(
+        json.dumps(settings_for_hash, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    settings_hash_short = settings_hash_full[:12]
+
+    required_keys = ["chunk_id", "chunk_key", "chunk_hash", "source_uri", "chunk_index", "cleaned_text"]
     hash_settings = {
         "pipeline_version": PIPELINE_VERSION,
         "stage3_version": STAGE3_VERSION,
@@ -152,7 +204,7 @@ def main() -> None:
         "chroma_meta_keys": CHROMA_META_KEYS,
         "required_keys": required_keys,
     }
-    settings_hash = stable_settings_hash(hash_settings)
+    collection_settings_hash = stable_settings_hash(hash_settings)
 
     print(
         f"[stage_3] start persist_dir={persist_dir_path} | collection={args.collection} | "
@@ -162,7 +214,7 @@ def main() -> None:
     print(f"[stage_3] chunks_jsonl={chunks_path}")
     print(f"[stage_3] embed_model={args.embed_model}")
     print(f"[stage_3] device={device} | cuda_available={torch.cuda.is_available()}")
-    print(f"[stage_3] settings_hash={settings_hash}")
+    print(f"[stage_3] settings_hash={collection_settings_hash}")
 
     if args.dry_run:
         print("[stage_3] dry_run=True (not embedding / not writing DB)")
@@ -191,7 +243,7 @@ def main() -> None:
                 "stage3_version": STAGE3_VERSION,
                 "embed_model": args.embed_model,
                 "device": device,
-                "settings_hash": settings_hash,
+                "settings_hash": collection_settings_hash,
             },
         )
     else:
@@ -205,7 +257,7 @@ def main() -> None:
                     "stage3_version": STAGE3_VERSION,
                     "embed_model": args.embed_model,
                     "device": device,
-                    "settings_hash": settings_hash,
+                    "settings_hash": collection_settings_hash,
                 },
             )
             print(f"[stage_3] created collection: {args.collection}")
@@ -219,7 +271,7 @@ def main() -> None:
                     "Collection embed_model mismatch. "
                     "Use --mode rebuild or a new --collection name."
                 )
-            if coll_hash and coll_hash != settings_hash:
+            if coll_hash and coll_hash != collection_settings_hash:
                 raise ValueError(
                     "Collection settings_hash mismatch. "
                     "Use --mode rebuild or a new --collection name."
@@ -227,6 +279,7 @@ def main() -> None:
 
     incoming_ids_by_doc: Dict[str, Set[str]] = {}
     first_seen: Dict[str, Tuple[int, str]] = {}
+    doc_ids_seen: Set[str] = set()
     rows_seen = 0
     embedded_or_upserted = 0
     skipped_unchanged = 0
@@ -350,7 +403,9 @@ def main() -> None:
         if args.sync_deletes and not doc_id:
             raise ValueError(f"sync_deletes requires doc_id at row {rows_seen}")
         if doc_id:
-            incoming_ids_by_doc.setdefault(str(doc_id), set()).add(chunk_id)
+            doc_id_str = str(doc_id)
+            incoming_ids_by_doc.setdefault(doc_id_str, set()).add(chunk_id)
+            doc_ids_seen.add(doc_id_str)
 
         base = {k: m.get(k) for k in CHROMA_META_KEYS if k != "heading_path_str" and m.get(k) is not None}
         base["heading_path_str"] = heading_path_str
@@ -389,25 +444,101 @@ def main() -> None:
     print(f"[stage_3] wrote collection={args.collection} | total_added={embedded_or_upserted}")
     print(f"[stage_3] persist_dir={persist_dir_path}")
 
-    # Write run manifest
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    finished_dt = datetime.now(timezone.utc)
+    duration_s = time.perf_counter() - start_perf
+    git_commit, git_dirty = get_git_info(Path(__file__).resolve().parent)
+    chunks_stat = chunks_path.stat()
+    chunks_jsonl_bytes = chunks_stat.st_size
+    chunks_jsonl_mtime_utc = datetime.fromtimestamp(
+        chunks_stat.st_mtime, tz=timezone.utc
+    ).isoformat().replace("+00:00", "Z")
+    chunks_jsonl_sha256 = sha256_file(chunks_path)
+    try:
+        final_collection_count = collection.count()
+    except Exception:
+        final_collection_count = None
+
     manifest = {
-        "pipeline_version": PIPELINE_VERSION,
-        "stage3_version": STAGE3_VERSION,
-        "run_settings": run_settings,
-        "hash_settings": hash_settings,
-        "settings_hash": settings_hash,
-        "counts": {
-            "rows_seen": rows_seen,
-            "embedded_or_upserted": embedded_or_upserted,
-            "skipped_unchanged": skipped_unchanged,
-            "docs_synced": docs_synced,
-            "chunks_deleted": chunks_deleted,
+        "run_id": f"{start_dt.strftime('%Y%m%d_%H%M%S')}_{settings_hash_short}",
+        "started_at_utc": start_dt.isoformat().replace("+00:00", "Z"),
+        "finished_at_utc": finished_dt.isoformat().replace("+00:00", "Z"),
+        "duration_s": duration_s,
+        "versions": {
+            "pipeline_version": PIPELINE_VERSION,
+            "stage3_version": STAGE3_VERSION,
+        },
+        "collection_settings_hash": collection_settings_hash,
+        "settings_for_hash": settings_for_hash,
+        "settings_hash_short": settings_hash_short,
+        "settings_hash_full": settings_hash_full,
+        "system": {
+            "hostname": socket.gethostname(),
+            "platform": sys.platform,
+            "python_version": sys.version.split()[0],
+        },
+        "repo": {
+            "git_commit": git_commit,
+            "git_dirty": git_dirty,
+        },
+        "input_provenance": {
+            "chunks_jsonl_path_abs": str(chunks_path),
+            "chunks_jsonl_bytes": chunks_jsonl_bytes,
+            "chunks_jsonl_mtime_utc": chunks_jsonl_mtime_utc,
+            "chunks_jsonl_sha256": chunks_jsonl_sha256,
+            "total_rows_read": rows_seen,
+            "unique_doc_ids": len(doc_ids_seen),
+            "unique_chunk_ids": len(first_seen),
+        },
+        "index_settings": index_settings,
+        "outcomes": {
+            "embedded_or_upserted_count": embedded_or_upserted,
+            "skipped_unchanged_count": skipped_unchanged,
+            "deleted_stale_count": chunks_deleted,
+            "final_collection_count": final_collection_count,
+            "errors_count": 0,
         },
     }
-    manifest_path = persist_dir_path / f"run_manifest_{ts}_{settings_hash}.json"
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    manifest_ts = finished_dt.strftime("%Y%m%d_%H%M%S")
+    manifest_filename = f"run_manifest_{manifest_ts}_{settings_hash_short}.json"
+    manifest_path = persist_dir_path / manifest_filename
+    tmp_manifest_path = manifest_path.with_suffix(".json.tmp")
+    tmp_manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp_manifest_path.replace(manifest_path)
     print(f"[stage_3] wrote manifest: {manifest_path}")
+
+    index_line = {
+        "manifest_filename": manifest_filename,
+        "started_at_utc": manifest["started_at_utc"],
+        "finished_at_utc": manifest["finished_at_utc"],
+        "duration_s": manifest["duration_s"],
+        "chunks_jsonl_sha256": chunks_jsonl_sha256,
+        "chunks_jsonl_mtime_utc": chunks_jsonl_mtime_utc,
+        "chunks_jsonl_path_abs": str(chunks_path),
+        "settings_hash_short": settings_hash_short,
+        "pipeline_version": PIPELINE_VERSION,
+        "stage3_version": STAGE3_VERSION,
+        "collection_settings_hash": collection_settings_hash,
+        "collection": args.collection,
+        "embed_model": args.embed_model,
+        "device": device,
+        "batch_size": args.batch_size,
+        "mode": args.mode,
+        "sync_deletes": args.sync_deletes,
+        "skip_unchanged": args.skip_unchanged,
+        "embedded_or_upserted_count": embedded_or_upserted,
+        "skipped_unchanged_count": skipped_unchanged,
+        "deleted_stale_count": chunks_deleted,
+        "final_collection_count": final_collection_count,
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+    }
+    index_path = persist_dir_path / "run_manifests_index.jsonl"
+    with index_path.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(index_line, ensure_ascii=False, separators=(",", ":")) + "\n")
+    print(f"[stage_3] appended manifest index: {index_path}")
 
 
 if __name__ == "__main__":
